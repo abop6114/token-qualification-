@@ -3,11 +3,16 @@ const RPC_REQUEST_ID = 1;
 
 type JsonObject = Record<string, unknown>;
 
+export interface RawSolanaAccount {
+  owner: string;
+  dataBase64: string;
+}
+
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function solanaAccountExists(address: string): Promise<boolean> {
+export async function getSolanaAccount(address: string): Promise<RawSolanaAccount | null> {
   const apiKey = process.env.HELIUS_API_KEY;
 
   if (apiKey === undefined || apiKey.trim() === "") {
@@ -74,12 +79,25 @@ export async function solanaAccountExists(address: string): Promise<boolean> {
   }
 
   if (result.value === null) {
-    return false;
+    return null;
   }
 
-  if (!isJsonObject(result.value)) {
+  if (!isJsonObject(result.value) || typeof result.value.owner !== "string") {
     throw new Error("Helius RPC returned a malformed account value.");
   }
 
-  return true;
+  const accountData = result.value.data;
+
+  if (
+    !Array.isArray(accountData) ||
+    typeof accountData[0] !== "string" ||
+    accountData[1] !== "base64"
+  ) {
+    throw new Error("Helius RPC returned malformed base64 account data.");
+  }
+
+  return {
+    owner: result.value.owner,
+    dataBase64: accountData[0],
+  };
 }

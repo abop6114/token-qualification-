@@ -1,4 +1,5 @@
-import { solanaAccountExists } from "./providers/solana/heliusRpc";
+import { normalizeSolanaMintAccount } from "./normalization/solanaMint";
+import { getSolanaAccount } from "./providers/solana/heliusRpc";
 import { isSolanaPublicKeySyntax } from "./validation/solanaAddress";
 
 async function main(): Promise<void> {
@@ -26,16 +27,19 @@ async function main(): Promise<void> {
   }
 
   try {
-    const exists = await solanaAccountExists(mintAddress);
+    const account = await getSolanaAccount(mintAddress);
+    const resolution = normalizeSolanaMintAccount(account);
+    let status: "account_not_found" | "account_found_not_mint" | "mint_found";
 
-    console.log(
-      JSON.stringify({
-        chain: "solana",
-        mintAddress,
-        status: exists ? "account_found" : "account_not_found",
-        onChainAccount: { exists },
-      }),
-    );
+    if (!resolution.exists) {
+      status = "account_not_found";
+    } else if (!resolution.isMint) {
+      status = "account_found_not_mint";
+    } else {
+      status = "mint_found";
+    }
+
+    console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution }));
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unexpected provider error.";
     console.error(`Error: ${message}`);

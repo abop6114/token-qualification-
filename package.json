@@ -4,6 +4,7 @@
   "description": "Solana-first token qualification CLI for evidence-based analysis and JSON reports.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test",
     "start": "node --env-file=.env dist/cli.js"
   },
   "repository": {
@@ -24,3 +25,4 @@
     "typescript": "^5.9.3"
   }
 }
+
