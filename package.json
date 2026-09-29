@@ -1,0 +1,26 @@
+{
+  "name": "token-qualification-engine",
+  "version": "0.1.0",
+  "description": "Solana-first token qualification CLI for evidence-based analysis and JSON reports.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abop6114/token-qualification-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/abop6114/token-qualification-/issues"
+  },
+  "homepage": "https://github.com/abop6114/token-qualification-#readme",
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
+  }
+}
