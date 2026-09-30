@@ -1,5 +1,7 @@
 import { normalizeSolanaMintAccount } from "./normalization/solanaMint";
+import { normalizeMarketSnapshot } from "./normalization/marketSnapshot";
 import { getSolanaAccount } from "./providers/solana/heliusRpc";
+import { getSolanaMintMarkets } from "./providers/market/dexScreener";
 import { isSolanaPublicKeySyntax } from "./validation/solanaAddress";
 
 async function main(): Promise<void> {
@@ -37,6 +39,13 @@ async function main(): Promise<void> {
       status = "account_found_not_mint";
     } else {
       status = "mint_found";
+    }
+
+    if (resolution.isMint) {
+      const providerMarkets = await getSolanaMintMarkets(mintAddress);
+      const market = normalizeMarketSnapshot("solana", mintAddress, providerMarkets);
+      console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution, market }));
+      return;
     }
 
     console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution }));
