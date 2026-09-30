@@ -1,6 +1,8 @@
-import { normalizeSolanaMintAccount } from "./normalization/solanaMint";
+import { getSolanaMintExtensionTypes, normalizeSolanaMintAccount } from "./normalization/solanaMint";
 import { normalizeMarketSnapshot } from "./normalization/marketSnapshot";
+import { normalizeSolanaHolderStructure } from "./normalization/solanaHolders";
 import { getSolanaAccount } from "./providers/solana/heliusRpc";
+import { getSolanaTokenAccountPages } from "./providers/solana/heliusTokenAccounts";
 import { getSolanaMintMarkets } from "./providers/market/dexScreener";
 import { isSolanaPublicKeySyntax } from "./validation/solanaAddress";
 
@@ -44,7 +46,18 @@ async function main(): Promise<void> {
     if (resolution.isMint) {
       const providerMarkets = await getSolanaMintMarkets(mintAddress);
       const market = normalizeMarketSnapshot("solana", mintAddress, providerMarkets);
-      console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution, market }));
+      if (account === null) throw new Error("Resolved mint account evidence is missing.");
+      const mintExtensionTypes = getSolanaMintExtensionTypes(account, resolution.tokenProgram);
+      const holderPages = await getSolanaTokenAccountPages(mintAddress, resolution.tokenProgram);
+      const holderStructure = normalizeSolanaHolderStructure({
+        mintAddress,
+        tokenProgram: resolution.tokenProgram,
+        decimals: resolution.decimals,
+        currentMintSupplyRaw: resolution.rawSupply,
+        mintExtensionTypes,
+        pages: holderPages,
+      });
+      console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution, market, holderStructure }));
       return;
     }
 

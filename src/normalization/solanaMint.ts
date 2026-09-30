@@ -1,7 +1,10 @@
 import type { RawSolanaAccount } from "../providers/solana/heliusRpc";
+import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../types/solana";
+import {
+  parseToken2022MintExtensionTypes,
+  parseToken2022TokenAccountExtensionTypes,
+} from "./token2022Extensions";
 
-const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-const TOKEN_2022_PROGRAM_ID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const MINT_BASE_SIZE = 82;
 const TOKEN_ACCOUNT_BASE_SIZE = 165;
 const TOKEN_2022_ACCOUNT_TYPE_OFFSET = TOKEN_ACCOUNT_BASE_SIZE;
@@ -10,16 +13,7 @@ const TOKEN_2022_MINT_ACCOUNT_TYPE = 1;
 const TOKEN_2022_TOKEN_ACCOUNT_TYPE = 2;
 const TOKEN_2022_MULTISIG_SIZE = 355;
 
-const MINT_EXTENSION_TYPES = new Set([
-  1, 3, 4, 6, 9, 10, 12, 14, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28,
-]);
-const TOKEN_ACCOUNT_EXTENSION_TYPES = new Set([2, 5, 7, 8, 11, 13, 15, 17, 27]);
-const KNOWN_EXTENSION_TYPES = new Set([
-  ...MINT_EXTENSION_TYPES,
-  ...TOKEN_ACCOUNT_EXTENSION_TYPES,
-]);
-
-export type TokenProgram = "spl-token" | "token-2022";
+export type { TokenProgram } from "../types/solana";
 
 export type SolanaMintResolution =
   | { exists: false; isMint: false }
@@ -77,48 +71,6 @@ function isInitializedTokenAccountBase(data: Uint8Array): boolean {
   );
 }
 
-function hasValidExtensions(
-  data: Uint8Array,
-  accountType: "mint" | "token-account",
-): boolean {
-  const allowedTypes = accountType === "mint" ? MINT_EXTENSION_TYPES : TOKEN_ACCOUNT_EXTENSION_TYPES;
-  let cursor = TOKEN_2022_TLV_OFFSET;
-
-  while (cursor < data.byteLength) {
-    const remaining = data.byteLength - cursor;
-
-    // SPL permits one trailing byte during a reallocating account-size change.
-    if (remaining < 2) {
-      return true;
-    }
-
-    const view = new DataView(data.buffer, data.byteOffset + cursor, remaining);
-    const extensionType = view.getUint16(0, true);
-
-    // An uninitialized TLV type terminates iteration; trailing allocated bytes are ignored.
-    if (extensionType === 0) {
-      return true;
-    }
-
-    if (!KNOWN_EXTENSION_TYPES.has(extensionType) || !allowedTypes.has(extensionType)) {
-      return false;
-    }
-
-    if (remaining < 4) {
-      return false;
-    }
-
-    const extensionLength = view.getUint16(2, true);
-    cursor += 4 + extensionLength;
-
-    if (cursor > data.byteLength) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 function isToken2022Mint(data: Uint8Array): boolean {
   if (!isInitializedMintBase(data)) {
     return false;
@@ -137,7 +89,7 @@ function isToken2022Mint(data: Uint8Array): boolean {
   return (
     mintPadding.every((byte) => byte === 0) &&
     data[TOKEN_2022_ACCOUNT_TYPE_OFFSET] === TOKEN_2022_MINT_ACCOUNT_TYPE &&
-    hasValidExtensions(data, "mint")
+    parseToken2022MintExtensionTypes(data) !== null
   );
 }
 
@@ -156,8 +108,27 @@ function isToken2022TokenAccount(data: Uint8Array): boolean {
 
   return (
     data[TOKEN_2022_ACCOUNT_TYPE_OFFSET] === TOKEN_2022_TOKEN_ACCOUNT_TYPE &&
-    hasValidExtensions(data, "token-account")
+    parseToken2022TokenAccountExtensionTypes(data) !== null
   );
+}
+
+export function getSolanaMintExtensionTypes(
+  account: RawSolanaAccount,
+  tokenProgram: TokenProgram,
+): number[] {
+  if (tokenProgram === "spl-token") return [];
+
+  const data = decodeBase64(account.dataBase64);
+  if (!isToken2022Mint(data)) {
+    throw new Error("Resolved Token-2022 mint account has an invalid extension layout.");
+  }
+  if (data.byteLength === MINT_BASE_SIZE) return [];
+
+  const extensionTypes = parseToken2022MintExtensionTypes(data);
+  if (extensionTypes === null) {
+    throw new Error("Resolved Token-2022 mint has malformed extension data.");
+  }
+  return extensionTypes;
 }
 
 function normalizeMint(data: Uint8Array, tokenProgram: TokenProgram): SolanaMintResolution {
@@ -180,7 +151,7 @@ export function normalizeSolanaMintAccount(
     return { exists: false, isMint: false };
   }
 
-  if (account.owner === SPL_TOKEN_PROGRAM_ID) {
+  if (account.owner === SOLANA_TOKEN_PROGRAM_IDS["spl-token"]) {
     const data = decodeBase64(account.dataBase64);
 
     return data.byteLength === MINT_BASE_SIZE && isInitializedMintBase(data)
@@ -188,7 +159,7 @@ export function normalizeSolanaMintAccount(
       : { exists: true, isMint: false };
   }
 
-  if (account.owner === TOKEN_2022_PROGRAM_ID) {
+  if (account.owner === SOLANA_TOKEN_PROGRAM_IDS["token-2022"]) {
     const data = decodeBase64(account.dataBase64);
     const isMint = isToken2022Mint(data);
     const isTokenAccount = isToken2022TokenAccount(data);
