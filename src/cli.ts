@@ -1,6 +1,7 @@
 import { getSolanaMintExtensionTypes, normalizeSolanaMintAccount } from "./normalization/solanaMint";
 import { normalizeMarketSnapshot } from "./normalization/marketSnapshot";
 import { normalizeSolanaHolderStructure } from "./normalization/solanaHolders";
+import { normalizeOwnerAuthorityBalanceDistribution } from "./normalization/ownerAuthorityBalanceDistribution";
 import { getSolanaAccount } from "./providers/solana/heliusRpc";
 import { getSolanaTokenAccountPages } from "./providers/solana/heliusTokenAccounts";
 import { getSolanaMintMarkets } from "./providers/market/dexScreener";
@@ -57,7 +58,18 @@ async function main(): Promise<void> {
         mintExtensionTypes,
         pages: holderPages,
       });
-      console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution, market, holderStructure }));
+      const ownerAuthorityBalanceDistribution = normalizeOwnerAuthorityBalanceDistribution({
+        chain: holderStructure.chain,
+        assetAddress: holderStructure.mintAddress,
+        snapshotAt: holderStructure.fetchedAt,
+        decimals: holderStructure.decimals,
+        currentSupplyRaw: holderStructure.currentMintSupplyRaw,
+        enumeration: holderStructure.enumeration,
+        amountCoverage: holderStructure.amountCoverage,
+        rawOwnerCount: holderStructure.rawOwnerCount,
+        rawOwnerAuthorities: holderStructure.rawOwnerAuthorities,
+      });
+      console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution, market, holderStructure, ownerAuthorityBalanceDistribution }));
       return;
     }
 
