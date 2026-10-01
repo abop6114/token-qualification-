@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
+const { normalizeOwnerAuthorityBalanceDistribution } = require("../dist/normalization/ownerAuthorityBalanceDistribution.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { decodeSolanaPublicKey, encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
@@ -48,6 +49,81 @@ test("counts token accounts including zero balances and aggregates positive bala
   assert.equal(result.rawOwnerAuthorities[0].balanceRaw, "60");
   assert.equal(result.rawOwnerAuthorities[1].balanceRaw, "40");
   assert.equal(result.rawOwnerAuthorities[1].tokenAccountCount, 2);
+  assert.deepEqual(result.tokenAccountStateSummary, {
+    initialized: { tokenAccountCount: 3, positiveBalanceTokenAccountCount: 2, observedBalanceRaw: "100" },
+    frozen: { tokenAccountCount: 0, positiveBalanceTokenAccountCount: 0, observedBalanceRaw: "0" },
+  });
+});
+
+test("summarizes all-frozen accounts including a zero-balance account", () => {
+  const result = normalize([
+    account(1, "25", { state: 2 }),
+    account(2, "0", { state: 2 }),
+  ]);
+  assert.deepEqual(result.tokenAccountStateSummary, {
+    initialized: { tokenAccountCount: 0, positiveBalanceTokenAccountCount: 0, observedBalanceRaw: "0" },
+    frozen: { tokenAccountCount: 2, positiveBalanceTokenAccountCount: 1, observedBalanceRaw: "25" },
+  });
+});
+
+test("reconciles initialized and frozen account evidence without classifying owner authorities", () => {
+  const result = normalize([
+    account(8, "9007199254740993", { state: 1 }),
+    account(8, "7", { state: 2, addressByte: 99 }),
+    account(9, "0", { state: 1 }),
+    account(10, "0", { state: 2 }),
+  ], { currentMintSupplyRaw: "9007199254741000" });
+  const states = result.tokenAccountStateSummary;
+
+  assert.equal(states.initialized.tokenAccountCount, 2);
+  assert.equal(states.frozen.tokenAccountCount, 2);
+  assert.equal(states.initialized.positiveBalanceTokenAccountCount, 1);
+  assert.equal(states.frozen.positiveBalanceTokenAccountCount, 1);
+  assert.equal(states.initialized.observedBalanceRaw, "9007199254740993");
+  assert.equal(states.frozen.observedBalanceRaw, "7");
+
+  assert.equal(states.initialized.tokenAccountCount + states.frozen.tokenAccountCount, result.tokenAccountCount);
+  assert.equal(states.initialized.positiveBalanceTokenAccountCount + states.frozen.positiveBalanceTokenAccountCount, result.nonzeroTokenAccountCount);
+  assert.equal((BigInt(states.initialized.observedBalanceRaw) + BigInt(states.frozen.observedBalanceRaw)).toString(), result.observedPositiveBalanceRaw);
+
+  assert.equal(result.rawOwnerCount, 1);
+  assert.equal(result.rawOwnerAuthorities[0].balanceRaw, "9007199254741000");
+  assert.equal(result.rawOwnerAuthorities[0].tokenAccountCount, 2);
+  assert.equal(result.concentration.top1.percentage, "100.000000");
+
+  const distribution = normalizeOwnerAuthorityBalanceDistribution({
+    chain: result.chain,
+    assetAddress: result.mintAddress,
+    snapshotAt: result.fetchedAt,
+    decimals: result.decimals,
+    currentSupplyRaw: result.currentMintSupplyRaw,
+    enumeration: result.enumeration,
+    amountCoverage: result.amountCoverage,
+    rawOwnerCount: result.rawOwnerCount,
+    rawOwnerAuthorities: result.rawOwnerAuthorities,
+  });
+  assert.equal(distribution.observedOwnerAuthorityCount, 1);
+  assert.equal(distribution.minimumBalanceRaw, "9007199254741000");
+  assert.equal(distribution.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceRaw, "9007199254741000");
+});
+
+test("retains a maximum u64 balance in its observed account state", () => {
+  const result = normalize([account(1, "18446744073709551615", { state: 2 })], {
+    currentMintSupplyRaw: "18446744073709551615",
+  });
+  assert.equal(result.tokenAccountStateSummary.frozen.observedBalanceRaw, "18446744073709551615");
+  assert.equal(result.tokenAccountStateSummary.frozen.positiveBalanceTokenAccountCount, 1);
+  assert.equal(result.tokenAccountStateSummary.initialized.observedBalanceRaw, "0");
+});
+
+test("retains exact state totals above JavaScript safe integer range", () => {
+  const result = normalize([
+    account(1, "9007199254740993", { state: 1 }),
+    account(2, "9007199254740993", { state: 2 }),
+  ], { currentMintSupplyRaw: "18014398509481986" });
+  assert.equal(result.tokenAccountStateSummary.initialized.observedBalanceRaw, "9007199254740993");
+  assert.equal(result.tokenAccountStateSummary.frozen.observedBalanceRaw, "9007199254740993");
+  assert.equal(result.observedPositiveBalanceRaw, "18014398509481986");
 });
 
 test("calculates top owner concentration with raw supply denominator and fixed precision", () => {
@@ -103,6 +179,9 @@ test("retains positive balances for frozen state-2 token accounts", () => {
   assert.equal(result.tokenAccountCount, 1);
   assert.equal(result.nonzeroTokenAccountCount, 1);
   assert.equal(result.rawOwnerAuthorities[0].balanceRaw, "25");
+  assert.deepEqual(result.tokenAccountStateSummary.frozen, {
+    tokenAccountCount: 1, positiveBalanceTokenAccountCount: 1, observedBalanceRaw: "25",
+  });
 });
 
 test("preserves page count and every provider context slot", () => {
@@ -115,12 +194,25 @@ test("preserves page count and every provider context slot", () => {
   assert.deepEqual(result.enumeration, {
     completeness: "complete", slotConsistency: "not_guaranteed", pageCount: 2, contextSlots: [123, 124],
   });
+  assert.equal(result.tokenAccountStateSummary.initialized.tokenAccountCount, 1);
+  assert.equal(result.enumeration.slotConsistency, "not_guaranteed");
 });
 
 test("does not report completeness when the final page still has a cursor", () => {
   assert.throws(() => normalize([], {
     pages: [{ accounts: [], paginationKey: "more", contextSlot: 123 }],
   }), /enumeration is incomplete/);
+});
+
+test("partial Token-2022 amount coverage is unchanged while state evidence remains observable", () => {
+  const result = normalize([account(1, "10", { state: 2, program: "token-2022", extension: { type: 2 } })], {
+    tokenProgram: "token-2022",
+  });
+  assert.equal(result.amountCoverage.state, "partial");
+  assert.equal(result.tokenAccountStateSummary.frozen.tokenAccountCount, 1);
+  assert.equal(result.tokenAccountStateSummary.frozen.observedBalanceRaw, "10");
+  assert.equal(result.enumeration.completeness, "complete");
+  assert.equal(result.enumeration.slotConsistency, "not_guaranteed");
 });
 
 test("rejects duplicate token-account addresses instead of double-counting", () => {
@@ -144,10 +236,12 @@ test("rejects malformed base64, data length, and invalid account state", () => {
   wrongSpace.reportedSpace = 2;
   assert.throws(() => normalize([wrongSpace]), /reported space/);
   const badState = account(1, "1");
-  const bytes = Buffer.from(badState.dataBase64, "base64");
-  bytes[108] = 0;
-  badState.dataBase64 = bytes.toString("base64");
-  assert.throws(() => normalize([badState]), /uninitialized/);
+  for (const invalidState of [0, 3]) {
+    const bytes = Buffer.from(badState.dataBase64, "base64");
+    bytes[108] = invalidState;
+    badState.dataBase64 = bytes.toString("base64");
+    assert.throws(() => normalize([badState]), /uninitialized/);
+  }
 });
 
 test("does not convert a zero current supply into a zero concentration", () => {

@@ -19,6 +19,15 @@ export interface HolderOwnerBalance {
   tokenAccountCount: number;
 }
 
+export interface TokenAccountStateMetrics {
+  /** All valid captured token accounts in this state, including zero-balance accounts. */
+  tokenAccountCount: number;
+  /** Captured token accounts in this state with a positive decoded raw amount. */
+  positiveBalanceTokenAccountCount: number;
+  /** Sum of decoded raw amounts in this state; interpretation remains subject to parent amount coverage. */
+  observedBalanceRaw: string;
+}
+
 export type HolderConcentration =
   | {
       status: "available";
@@ -58,6 +67,11 @@ export interface SolanaHolderStructure {
   };
   tokenAccountCount: number;
   nonzeroTokenAccountCount: number;
+  /** Token-account state observed at snapshot time; this is not an owner or holder classification. */
+  tokenAccountStateSummary: {
+    initialized: TokenAccountStateMetrics;
+    frozen: TokenAccountStateMetrics;
+  };
   /** Distinct positive-balance token-account owner authorities, not economic owners. */
   rawOwnerCount: number;
   rawOwnerAuthorities: HolderOwnerBalance[];

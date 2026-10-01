@@ -2,6 +2,7 @@ import type {
   RawSolanaTokenAccountPage,
   SolanaHolderStructure,
   HolderConcentration,
+  TokenAccountStateMetrics,
 } from "../types/holders";
 import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../types/solana";
 import { decodeSolanaPublicKey, encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
@@ -82,8 +83,10 @@ export function normalizeSolanaHolderStructure(
     if (BALANCE_AFFECTING_MINT_EXTENSIONS.has(extensionType)) unsupportedExtensions.add(extensionType);
   }
 
-  let tokenAccountCount = 0;
-  let nonzeroTokenAccountCount = 0;
+  const tokenAccountStates = {
+    initialized: { tokenAccountCount: 0, positiveBalanceTokenAccountCount: 0, observedBalance: 0n },
+    frozen: { tokenAccountCount: 0, positiveBalanceTokenAccountCount: 0, observedBalance: 0n },
+  };
   const expectedProgram = SOLANA_TOKEN_PROGRAM_IDS[input.tokenProgram];
 
   for (const page of input.pages) {
@@ -119,13 +122,15 @@ export function normalizeSolanaHolderStructure(
       }
 
       const amount = new DataView(data.buffer, data.byteOffset, data.byteLength).getBigUint64(64, true);
+      const stateMetrics = tokenAccountStates[data[108] === 1 ? "initialized" : "frozen"];
+      stateMetrics.tokenAccountCount += 1;
+      stateMetrics.observedBalance += amount;
+      if (amount > 0n) stateMetrics.positiveBalanceTokenAccountCount += 1;
       const ownerAddress = encodeSolanaPublicKey(data.subarray(32, 64));
       const current = ownerTotals.get(ownerAddress) ?? { amount: 0n, accounts: 0 };
       current.amount += amount;
       current.accounts += 1;
       ownerTotals.set(ownerAddress, current);
-      tokenAccountCount += 1;
-      if (amount > 0n) nonzeroTokenAccountCount += 1;
     }
   }
 
@@ -136,6 +141,13 @@ export function normalizeSolanaHolderStructure(
 
   const supply = BigInt(input.currentMintSupplyRaw);
   const observedPositiveBalance = owners.reduce((sum, owner) => sum + owner.balance, 0n);
+  const stateObservedBalance = tokenAccountStates.initialized.observedBalance + tokenAccountStates.frozen.observedBalance;
+  if (stateObservedBalance !== observedPositiveBalance) {
+    throw new Error("Token-account state balances do not reconcile with aggregated owner balances.");
+  }
+  const tokenAccountCount = tokenAccountStates.initialized.tokenAccountCount + tokenAccountStates.frozen.tokenAccountCount;
+  const nonzeroTokenAccountCount = tokenAccountStates.initialized.positiveBalanceTokenAccountCount +
+    tokenAccountStates.frozen.positiveBalanceTokenAccountCount;
   const supplyDifference = supply - observedPositiveBalance;
   const supplyInconsistent = observedPositiveBalance > supply;
   const partial = unsupportedExtensions.size > 0 || supplyInconsistent;
@@ -166,6 +178,11 @@ export function normalizeSolanaHolderStructure(
   const fetchedAt = input.fetchedAt ?? new Date().toISOString();
   if (Number.isNaN(Date.parse(fetchedAt))) throw new Error("Holder snapshot timestamp is invalid.");
   const unsupportedExtensionTypes = [...unsupportedExtensions].sort((a, b) => a - b);
+  const normalizeStateMetrics = (metrics: typeof tokenAccountStates.initialized): TokenAccountStateMetrics => ({
+    tokenAccountCount: metrics.tokenAccountCount,
+    positiveBalanceTokenAccountCount: metrics.positiveBalanceTokenAccountCount,
+    observedBalanceRaw: metrics.observedBalance.toString(),
+  });
   return {
     chain: "solana",
     mintAddress: input.mintAddress,
@@ -183,6 +200,10 @@ export function normalizeSolanaHolderStructure(
     },
     tokenAccountCount,
     nonzeroTokenAccountCount,
+    tokenAccountStateSummary: {
+      initialized: normalizeStateMetrics(tokenAccountStates.initialized),
+      frozen: normalizeStateMetrics(tokenAccountStates.frozen),
+    },
     rawOwnerCount: owners.length,
     rawOwnerAuthorities: owners.map(({ ownerAddress, balance, tokenAccountCount: count }) => ({ ownerAddress, balanceRaw: balance.toString(), tokenAccountCount: count })),
     amountCoverage: {
