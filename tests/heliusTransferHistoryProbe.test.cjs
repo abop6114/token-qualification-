@@ -110,6 +110,10 @@ test("queries an explicit multiple-owner list sequentially and reconciles run to
     assert.equal(result.runTelemetry.totalRequestCount, result.owners.reduce((sum, owner) => sum + owner.requestCount, 0));
     assert.equal(result.runTelemetry.totalPagesReceived, result.owners.reduce((sum, owner) => sum + owner.pageCount, 0));
     assert.equal(result.runTelemetry.totalRecordsReturned, result.owners.reduce((sum, owner) => sum + owner.recordsReturned, 0));
+    assert.equal(result.runTelemetry.totalPagesReceived, result.owners.reduce((sum, owner) => sum + owner.pages.length, 0));
+    assert.equal(result.runTelemetry.totalRecordsReturned, result.owners.reduce(
+      (sum, owner) => sum + owner.pages.reduce((pageSum, page) => pageSum + page.recordCount, 0), 0,
+    ));
   });
 });
 
@@ -120,6 +124,7 @@ test("successful empty history is distinct from provider failure", async () => {
     assert.equal(result.owners[0].paginationStatus, "complete");
     assert.equal(result.owners[0].recordsReturned, 0);
     assert.equal(result.runTelemetry.failedOwnerCount, 0);
+    assert.equal(result.owners[0].terminalReason, "natural_termination");
   });
 });
 
@@ -138,6 +143,7 @@ test("one owner provider failure is retained while later explicit owners are que
     assert.equal(requests.length, 2);
     assert.equal(result.owners[0].terminalStatus, "provider_error");
     assert.equal(result.owners[0].providerError.category, "rpc");
+    assert.equal(result.owners[0].terminalReason, "provider_error");
     assert.equal(result.owners[0].paginationStatus, "not_applicable");
     assert.equal(result.owners[1].terminalStatus, "success_with_records");
     assert.equal(result.runTelemetry.failedOwnerCount, 1);
@@ -159,6 +165,105 @@ test("paginates through short pages until natural provider termination", async (
     assert.equal(result.owners[0].recordsReturned, 1);
     assert.equal(result.owners[0].paginationStatus, "complete");
     assert.equal(result.owners[0].continuationCursorPresent, false);
+    assert.equal(result.owners[0].terminalReason, "natural_termination");
+    assert.deepEqual(result.owners[0].pages.map((page) => ({
+      pageNumber: page.pageNumber,
+      recordCount: page.recordCount,
+      requestLimit: page.requestLimit,
+      startRecordIndex: page.startRecordIndex,
+      endRecordIndexExclusive: page.endRecordIndexExclusive,
+      continuationTokenUsed: page.continuationTokenUsed,
+      continuationTokenReturned: page.continuationTokenReturned,
+    })), [
+      { pageNumber: 1, recordCount: 1, requestLimit: 100, startRecordIndex: 0, endRecordIndexExclusive: 1, continuationTokenUsed: false, continuationTokenReturned: true },
+      { pageNumber: 2, recordCount: 0, requestLimit: 100, startRecordIndex: 1, endRecordIndexExclusive: 1, continuationTokenUsed: true, continuationTokenReturned: false },
+    ]);
+  });
+});
+
+test("records ordered block-time boundaries and combined-list indexes across pages", async () => {
+  await withKey(async () => {
+    const result = await runHeliusTransferHistoryProbe(input({ maxPagesPerOwner: 2, maxRecordsPerOwner: 4 }), queuedFetch([
+      response([
+        transfer({ blockTime: 100 }),
+        transfer({ signature: "sig-2", blockTime: 110 }),
+      ], "page-two"),
+      response([
+        transfer({ signature: "sig-3", blockTime: 120 }),
+        transfer({ signature: "sig-4", blockTime: 130 }),
+      ], null),
+    ]));
+    assert.deepEqual(result.owners[0].pages, [
+      {
+        pageNumber: 1, requestLimit: 4, recordCount: 2,
+        startRecordIndex: 0, endRecordIndexExclusive: 2,
+        continuationTokenUsed: false, continuationTokenReturned: true,
+        firstUsableBlockTime: 100, lastUsableBlockTime: 110,
+        minimumUsableBlockTime: 100, maximumUsableBlockTime: 110,
+        recordsWithoutUsableBlockTime: 0,
+      },
+      {
+        pageNumber: 2, requestLimit: 2, recordCount: 2,
+        startRecordIndex: 2, endRecordIndexExclusive: 4,
+        continuationTokenUsed: true, continuationTokenReturned: false,
+        firstUsableBlockTime: 120, lastUsableBlockTime: 130,
+        minimumUsableBlockTime: 120, maximumUsableBlockTime: 130,
+        recordsWithoutUsableBlockTime: 0,
+      },
+    ]);
+    assert.equal(result.owners[0].recordsReturned, result.owners[0].pages.reduce((sum, page) => sum + page.recordCount, 0));
+    assert.equal(result.runTelemetry.totalPagesReceived, result.owners.reduce((sum, owner) => sum + owner.pages.length, 0));
+  });
+});
+
+test("page telemetry preserves reverse and non-monotonic provider block-time order", async () => {
+  await withKey(async () => {
+    for (const [times, expectedFirst, expectedLast, expectedMinimum, expectedMaximum] of [
+      [[300, 200, 100], 300, 100, 100, 300],
+      [[100, 300, 200], 100, 200, 100, 300],
+    ]) {
+      const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+        response(times.map((blockTime, index) => transfer({ signature: `sig-${index}`, blockTime })), null),
+      ]));
+      const [page] = result.owners[0].pages;
+      assert.equal(page.firstUsableBlockTime, expectedFirst);
+      assert.equal(page.lastUsableBlockTime, expectedLast);
+      assert.equal(page.minimumUsableBlockTime, expectedMinimum);
+      assert.equal(page.maximumUsableBlockTime, expectedMaximum);
+    }
+  });
+});
+
+test("counts missing and null block times without reordering page observations", async () => {
+  await withKey(async () => {
+    const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+      response([
+        transfer({ signature: "missing-time", blockTime: undefined }),
+        transfer({ signature: "first-time", blockTime: 200 }),
+        transfer({ signature: "null-time", blockTime: null }),
+        transfer({ signature: "last-time", blockTime: 100 }),
+      ]),
+    ]));
+    const [page] = result.owners[0].pages;
+    assert.equal(page.firstUsableBlockTime, 200);
+    assert.equal(page.lastUsableBlockTime, 100);
+    assert.equal(page.minimumUsableBlockTime, 100);
+    assert.equal(page.maximumUsableBlockTime, 200);
+    assert.equal(page.recordsWithoutUsableBlockTime, 2);
+    assert.deepEqual(result.owners[0].transfers.map((transfer) => transfer.signature), [
+      "missing-time", "first-time", "null-time", "last-time",
+    ]);
+  });
+});
+
+test("rejects malformed block times instead of counting them as unusable", async () => {
+  await withKey(async () => {
+    const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+      response([transfer({ blockTime: "not-a-time" })]),
+    ]));
+    assert.equal(result.owners[0].terminalStatus, "provider_error");
+    assert.equal(result.owners[0].terminalReason, "provider_error");
+    assert.equal(result.owners[0].providerError.category, "malformed_response");
   });
 });
 
@@ -170,6 +275,7 @@ test("rejects an omitted paginationToken instead of reporting complete history",
     assert.equal(result.owners[0].terminalStatus, "provider_error");
     assert.equal(result.owners[0].paginationStatus, "not_applicable");
     assert.equal(result.owners[0].providerError.category, "malformed_response");
+    assert.equal(result.owners[0].terminalReason, "provider_error");
     assert.equal(result.owners[0].requestCount, 1);
     assert.equal(result.owners[0].pageCount, 0);
   });
@@ -184,6 +290,7 @@ test("rejects empty and non-string non-null paginationToken values", async () =>
       assert.equal(result.owners[0].terminalStatus, "provider_error");
       assert.equal(result.owners[0].paginationStatus, "not_applicable");
       assert.equal(result.owners[0].providerError.category, "malformed_response");
+      assert.equal(result.owners[0].terminalReason, "provider_error");
     }
   });
 });
@@ -195,6 +302,7 @@ test("explicit page cap returns successful but truncated history", async () => {
     ]));
     assert.equal(result.owners[0].terminalStatus, "success_with_records");
     assert.equal(result.owners[0].paginationStatus, "truncated");
+    assert.equal(result.owners[0].terminalReason, "page_cap");
     assert.equal(result.owners[0].continuationCursorPresent, true);
     assert.equal(result.runTelemetry.anyQueryTruncated, true);
   });
@@ -209,7 +317,39 @@ test("record cap is sent as the page limit and truncation is not reported comple
     assert.equal(requests[0].body.params[1].limit, 2);
     assert.equal(result.owners[0].recordsReturned, 2);
     assert.equal(result.owners[0].paginationStatus, "truncated");
+    assert.equal(result.owners[0].terminalReason, "record_cap");
     assert.equal(result.runTelemetry.totalRecordsReturned, 2);
+  });
+});
+
+test("reports simultaneous page and record cap termination", async () => {
+  await withKey(async () => {
+    const result = await runHeliusTransferHistoryProbe(input({ maxPagesPerOwner: 1, maxRecordsPerOwner: 1 }), queuedFetch([
+      response([transfer()], "more-records"),
+    ]));
+    assert.equal(result.owners[0].paginationStatus, "truncated");
+    assert.equal(result.owners[0].terminalReason, "page_and_record_caps");
+  });
+});
+
+test("retains successful page telemetry when a later provider request fails", async () => {
+  await withKey(async () => {
+    const rpcFailure = new Response(JSON.stringify({
+      jsonrpc: "2.0", id: "tqe-transfer-history-probe", error: { code: -32000, message: "failure" },
+    }), { status: 200 });
+    const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+      response([transfer()], "next-page"),
+      rpcFailure,
+    ]));
+    const owner = result.owners[0];
+    assert.equal(owner.terminalReason, "provider_error");
+    assert.equal(owner.paginationStatus, "not_applicable");
+    assert.equal(owner.requestCount, 2);
+    assert.equal(owner.pageCount, 1);
+    assert.equal(owner.pages.length, 1);
+    assert.equal(owner.pages[0].continuationTokenReturned, true);
+    assert.equal(owner.pages[0].recordCount, owner.recordsReturned);
+    assert.equal(result.runTelemetry.totalRecordsReturned, owner.pages.reduce((sum, page) => sum + page.recordCount, 0));
   });
 });
 
@@ -219,6 +359,7 @@ test("natural termination at the exact record cap remains complete", async () =>
       response([transfer()], null),
     ]));
     assert.equal(result.owners[0].paginationStatus, "complete");
+    assert.equal(result.owners[0].terminalReason, "natural_termination");
     assert.equal(result.owners[0].terminalStatus, "success_with_records");
   });
 });
@@ -320,6 +461,20 @@ test("serialized output and errors never expose the API key or authenticated URL
     assert.equal(serialized.includes(API_KEY), false);
     assert.equal(serialized.includes("api-key="), false);
     assert.equal(serialized.includes("https://mainnet.helius-rpc.com"), false);
+  });
+});
+
+test("serialized probe output never exposes continuation-token values", async () => {
+  await withKey(async () => {
+    const continuation = "opaque-continuation-token-test-value";
+    const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+      response([transfer()], continuation),
+      response([], null),
+    ]));
+    const serialized = JSON.stringify(result);
+    assert.equal(serialized.includes(continuation), false);
+    assert.equal(result.owners[0].pages[0].continuationTokenReturned, true);
+    assert.equal(result.owners[0].pages[1].continuationTokenUsed, true);
   });
 });
 

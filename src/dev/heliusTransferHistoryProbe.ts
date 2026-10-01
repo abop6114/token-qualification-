@@ -17,6 +17,27 @@ export interface HeliusTransferHistoryProbeInput {
 
 export type ProbeTerminalStatus = "success_with_records" | "success_empty" | "provider_error";
 export type ProbePaginationStatus = "complete" | "truncated" | "not_applicable";
+export type ProbeTerminalReason =
+  | "natural_termination"
+  | "page_cap"
+  | "record_cap"
+  | "page_and_record_caps"
+  | "provider_error";
+
+export interface ProbePageTelemetry {
+  pageNumber: number;
+  requestLimit: number;
+  recordCount: number;
+  startRecordIndex: number;
+  endRecordIndexExclusive: number;
+  continuationTokenUsed: boolean;
+  continuationTokenReturned: boolean;
+  firstUsableBlockTime: number | null;
+  lastUsableBlockTime: number | null;
+  minimumUsableBlockTime: number | null;
+  maximumUsableBlockTime: number | null;
+  recordsWithoutUsableBlockTime: number;
+}
 
 export interface ProbeOwnerResult {
   queriedOwnerAuthority: string;
@@ -26,8 +47,10 @@ export interface ProbeOwnerResult {
   durationMs: number;
   terminalStatus: ProbeTerminalStatus;
   paginationStatus: ProbePaginationStatus;
+  terminalReason: ProbeTerminalReason;
   continuationCursorPresent: boolean;
   providerError: { category: HeliusTransferErrorCategory | "unexpected"; message: string } | null;
+  pages: ProbePageTelemetry[];
   transfers: HeliusTransferObservation[];
 }
 
@@ -105,6 +128,7 @@ async function queryOwner(
 ): Promise<ProbeOwnerResult> {
   const started = performance.now();
   const transfers: HeliusTransferObservation[] = [];
+  const pages: ProbePageTelemetry[] = [];
   const seenCursors = new Set<string>();
   let requestCount = 0;
   let pageCount = 0;
@@ -124,6 +148,23 @@ async function queryOwner(
         paginationToken,
       }, fetchImpl);
       pageCount += 1;
+      const pageStartRecordIndex = transfers.length;
+      const usableBlockTimes = page.observations.flatMap((observation) =>
+        typeof observation.blockTime === "number" ? [observation.blockTime] : []);
+      pages.push({
+        pageNumber: pageCount,
+        requestLimit: limit,
+        recordCount: page.observations.length,
+        startRecordIndex: pageStartRecordIndex,
+        endRecordIndexExclusive: pageStartRecordIndex + page.observations.length,
+        continuationTokenUsed: paginationToken !== null,
+        continuationTokenReturned: page.paginationToken !== null,
+        firstUsableBlockTime: usableBlockTimes[0] ?? null,
+        lastUsableBlockTime: usableBlockTimes[usableBlockTimes.length - 1] ?? null,
+        minimumUsableBlockTime: usableBlockTimes.length > 0 ? Math.min(...usableBlockTimes) : null,
+        maximumUsableBlockTime: usableBlockTimes.length > 0 ? Math.max(...usableBlockTimes) : null,
+        recordsWithoutUsableBlockTime: page.observations.length - usableBlockTimes.length,
+      });
       transfers.push(...page.observations);
 
       if (page.paginationToken === null) {
@@ -135,8 +176,10 @@ async function queryOwner(
           durationMs: elapsedMs(started),
           terminalStatus: transfers.length > 0 ? "success_with_records" : "success_empty",
           paginationStatus: "complete",
+          terminalReason: "natural_termination",
           continuationCursorPresent: false,
           providerError: null,
+          pages,
           transfers,
         };
       }
@@ -157,8 +200,12 @@ async function queryOwner(
           durationMs: elapsedMs(started),
           terminalStatus: transfers.length > 0 ? "success_with_records" : "success_empty",
           paginationStatus: "truncated",
+          terminalReason: recordCapReached && pageCapReached
+            ? "page_and_record_caps"
+            : recordCapReached ? "record_cap" : "page_cap",
           continuationCursorPresent: true,
           providerError: null,
+          pages,
           transfers,
         };
       }
@@ -176,8 +223,10 @@ async function queryOwner(
       durationMs: elapsedMs(started),
       terminalStatus: "provider_error",
       paginationStatus: "not_applicable",
+      terminalReason: "provider_error",
       continuationCursorPresent: false,
       providerError,
+      pages,
       transfers,
     };
   }
