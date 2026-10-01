@@ -270,9 +270,12 @@ export async function getHeliusTransferPage(
     throw new HeliusTransferProviderError("malformed_response", "Helius returned more transfer records than requested.");
   }
 
+  if (!Object.prototype.hasOwnProperty.call(result, "paginationToken")) {
+    throw new HeliusTransferProviderError("malformed_response", "Helius omitted the transfer-history pagination token.");
+  }
   const token = result.paginationToken;
-  if (token !== undefined && token !== null && (typeof token !== "string" || token.length === 0)) {
+  if (token !== null && (typeof token !== "string" || token.length === 0)) {
     throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history pagination token.");
   }
-  return { observations, paginationToken: typeof token === "string" ? token : null };
+  return { observations, paginationToken: token as string | null };
 }

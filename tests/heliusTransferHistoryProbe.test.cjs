@@ -162,6 +162,32 @@ test("paginates through short pages until natural provider termination", async (
   });
 });
 
+test("rejects an omitted paginationToken instead of reporting complete history", async () => {
+  await withKey(async () => {
+    const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+      response([transfer()], null, { paginationToken: undefined }),
+    ]));
+    assert.equal(result.owners[0].terminalStatus, "provider_error");
+    assert.equal(result.owners[0].paginationStatus, "not_applicable");
+    assert.equal(result.owners[0].providerError.category, "malformed_response");
+    assert.equal(result.owners[0].requestCount, 1);
+    assert.equal(result.owners[0].pageCount, 0);
+  });
+});
+
+test("rejects empty and non-string non-null paginationToken values", async () => {
+  await withKey(async () => {
+    for (const token of ["", 0, false, {}]) {
+      const result = await runHeliusTransferHistoryProbe(input(), queuedFetch([
+        response([], token),
+      ]));
+      assert.equal(result.owners[0].terminalStatus, "provider_error");
+      assert.equal(result.owners[0].paginationStatus, "not_applicable");
+      assert.equal(result.owners[0].providerError.category, "malformed_response");
+    }
+  });
+});
+
 test("explicit page cap returns successful but truncated history", async () => {
   await withKey(async () => {
     const result = await runHeliusTransferHistoryProbe(input({ maxPagesPerOwner: 1 }), queuedFetch([
