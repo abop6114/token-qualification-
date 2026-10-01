@@ -1,6 +1,8 @@
 import type {
   OwnerAuthorityBalanceDistribution,
   OwnerAuthorityBalanceSnapshot,
+  OwnerBalanceProfilePercentile,
+  CumulativeOwnerBalanceProfilePoint,
   RepeatedBalanceFrequency,
 } from "../types/ownerAuthorityBalanceDistribution";
 
@@ -13,6 +15,7 @@ const QUANTILES = [
   [90, "p90"],
   [99, "p99"],
 ] as const;
+const BALANCE_PROFILE_PERCENTILES: readonly OwnerBalanceProfilePercentile[] = [10, 25, 50, 75, 90, 99, 100];
 
 function parseRawInteger(value: string, label: string): bigint {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) {
@@ -51,6 +54,27 @@ export function normalizeOwnerAuthorityBalanceDistribution(
   const observedPositiveBalance = balances.reduce((total, balance) => total + balance, 0n);
   const supplyInconsistent = observedPositiveBalance > currentSupply;
 
+  const cumulativeOwnerBalanceProfile: CumulativeOwnerBalanceProfilePoint[] = [];
+  let cumulativeBalance = 0n;
+  let nextBalanceIndex = 0;
+  for (const ownerPercentile of BALANCE_PROFILE_PERCENTILES) {
+    const includedOwnerAuthorityCount = balances.length === 0
+      ? 0
+      : Math.ceil(ownerPercentile * balances.length / 100);
+    while (nextBalanceIndex < includedOwnerAuthorityCount) {
+      cumulativeBalance += balances[nextBalanceIndex];
+      nextBalanceIndex += 1;
+    }
+    cumulativeOwnerBalanceProfile.push({
+      ownerPercentile,
+      includedOwnerAuthorityCount,
+      cumulativeObservedBalanceRaw: cumulativeBalance.toString(),
+      cumulativeObservedBalanceShare: observedPositiveBalance === 0n
+        ? null
+        : formatPercentage(cumulativeBalance, observedPositiveBalance),
+    });
+  }
+
   const frequencyByBalance = new Map<string, number>();
   for (const balance of balances) {
     const raw = balance.toString();
@@ -88,6 +112,8 @@ export function normalizeOwnerAuthorityBalanceDistribution(
     observedOwnerAuthorityCount: populationCount,
     decimals: snapshot.decimals,
     currentSupplyRaw: snapshot.currentSupplyRaw,
+    observedPositiveOwnerAuthorityBalanceRaw: observedPositiveBalance.toString(),
+    cumulativeOwnerBalanceProfile,
     minimumBalanceRaw: balances[0]?.toString() ?? null,
     maximumBalanceRaw: balances.at(-1)?.toString() ?? null,
     medianBalanceRaw: quantiles.p50,

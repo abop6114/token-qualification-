@@ -4,6 +4,7 @@ const { normalizeOwnerAuthorityBalanceDistribution } = require("../dist/normaliz
 
 const MINT = "11111111111111111111111111111111";
 const SNAPSHOT_AT = "2026-09-30T12:00:00.000Z";
+const PROFILE_PERCENTILES = [10, 25, 50, 75, 90, 99, 100];
 
 function snapshot(balances, overrides = {}) {
   const rawOwnerAuthorities = balances.map((balanceRaw) => ({ balanceRaw: String(balanceRaw) }));
@@ -47,6 +48,13 @@ test("returns null distribution bounds and share for no positive owner authoriti
   assert.equal(result.authoritiesInRepeatedBalanceGroups, 0);
   assert.equal(result.authorityShareInRepeatedBalanceGroups, null);
   assert.deepEqual(result.repeatedBalanceGroups, []);
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "0");
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile, PROFILE_PERCENTILES.map((ownerPercentile) => ({
+    ownerPercentile,
+    includedOwnerAuthorityCount: 0,
+    cumulativeObservedBalanceRaw: "0",
+    cumulativeObservedBalanceShare: null,
+  })));
 });
 
 test("summarizes one owner authority without changing its exact balance", () => {
@@ -57,6 +65,73 @@ test("summarizes one owner authority without changing its exact balance", () => 
   assert.deepEqual(result.quantilesRaw, { p25: "42", p50: "42", p75: "42", p90: "42", p99: "42" });
   assert.equal(result.distinctBalanceCount, 1);
   assert.equal(result.repeatedBalanceGroupCount, 0);
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "42");
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile, PROFILE_PERCENTILES.map((ownerPercentile) => ({
+    ownerPercentile,
+    includedOwnerAuthorityCount: 1,
+    cumulativeObservedBalanceRaw: "42",
+    cumulativeObservedBalanceShare: "100.000000",
+  })));
+});
+
+test("uses exact ceiling coordinate counts for small populations", () => {
+  const result = normalize(["1", "2", "3", "4"]);
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.includedOwnerAuthorityCount), [1, 1, 2, 3, 4, 4, 4]);
+});
+
+test("profile uses ascending balances and nearest-rank cumulative sums for odd populations", () => {
+  const result = normalize(["100", "1", "4", "2", "3"]);
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "110");
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.cumulativeObservedBalanceRaw), ["1", "3", "6", "10", "110", "110", "110"]);
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.cumulativeObservedBalanceShare), [
+    "0.909091", "2.727273", "5.454545", "9.090909", "100.000000", "100.000000", "100.000000",
+  ]);
+});
+
+test("profile uses exact ceiling coordinate counts for even populations", () => {
+  const result = normalize(["100", "1", "3", "2"]);
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.includedOwnerAuthorityCount), [1, 1, 2, 3, 4, 4, 4]);
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.cumulativeObservedBalanceRaw), ["1", "1", "3", "6", "106", "106", "106"]);
+});
+
+test("equal-balance ties remain deterministic and p100 includes every authority", () => {
+  const result = normalize(["5", "1", "1", "1"]);
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.cumulativeObservedBalanceRaw), ["1", "1", "2", "3", "8", "8", "8"]);
+  const finalPoint = result.cumulativeOwnerBalanceProfile.at(-1);
+  assert.equal(finalPoint.includedOwnerAuthorityCount, result.observedOwnerAuthorityCount);
+  assert.equal(finalPoint.cumulativeObservedBalanceRaw, result.observedPositiveOwnerAuthorityBalanceRaw);
+  assert.equal(finalPoint.cumulativeObservedBalanceShare, "100.000000");
+});
+
+test("profile exposes a highly skewed low-balance tail without classifying it", () => {
+  const result = normalize(["1", "1", "1", "1", "996"]);
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.cumulativeObservedBalanceRaw), ["1", "2", "3", "4", "1000", "1000", "1000"]);
+});
+
+test("profile balances and shares are monotonic", () => {
+  const profile = normalize(["19", "1", "80", "3", "7", "11"]).cumulativeOwnerBalanceProfile;
+  const shareToScaledInteger = (share) => BigInt(share.replace(".", ""));
+  for (let index = 1; index < profile.length; index += 1) {
+    assert.ok(BigInt(profile[index].cumulativeObservedBalanceRaw) >= BigInt(profile[index - 1].cumulativeObservedBalanceRaw));
+    assert.ok(shareToScaledInteger(profile[index].cumulativeObservedBalanceShare) >= shareToScaledInteger(profile[index - 1].cumulativeObservedBalanceShare));
+  }
+});
+
+test("profile preserves balances above JavaScript safe integer range exactly", () => {
+  const result = normalize(["9007199254740993", "9007199254740992"]);
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "18014398509481985");
+  assert.deepEqual(result.cumulativeOwnerBalanceProfile.map((point) => point.cumulativeObservedBalanceRaw), [
+    "9007199254740992", "9007199254740992", "9007199254740992", "18014398509481985",
+    "18014398509481985", "18014398509481985", "18014398509481985",
+  ]);
+});
+
+test("profile supports maximum u64-scale balances and cumulative sums larger than u64", () => {
+  const maxU64 = "18446744073709551615";
+  const result = normalize([maxU64, maxU64], { currentSupplyRaw: maxU64 });
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "36893488147419103230");
+  assert.equal(result.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceRaw, "36893488147419103230");
+  assert.equal(result.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceShare, "100.000000");
 });
 
 test("uses nearest-rank quantiles for an odd population", () => {
@@ -166,6 +241,7 @@ test("inherits partial Token-2022 amount coverage", () => {
   assert.equal(result.coverage.state, "partial");
   assert.equal(result.coverage.amountCoverageState, "partial");
   assert.deepEqual(result.coverage.unsupportedExtensionTypes, [4, 17]);
+  assert.equal(result.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceShare, "100.000000");
 });
 
 test("inherits partial coverage when observed balances exceed current supply", () => {
@@ -179,6 +255,8 @@ test("inherits partial coverage when observed balances exceed current supply", (
   });
   assert.equal(result.coverage.state, "partial");
   assert.equal(result.coverage.amountCoverageReason, "supply_inconsistency");
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "120");
+  assert.equal(result.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceShare, "100.000000");
 });
 
 test("downgrades contradictory complete coverage when observed balances exceed supply", () => {
@@ -200,6 +278,8 @@ test("zero current mint supply does not change count-based repeated-balance evid
   assert.equal(result.currentSupplyRaw, "0");
   assert.equal(result.repeatedBalanceGroupCount, 1);
   assert.equal(result.authorityShareInRepeatedBalanceGroups, "100.000000");
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "10");
+  assert.equal(result.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceShare, "100.000000");
 });
 
 test("marks incomplete source enumeration as partial", () => {
@@ -213,6 +293,7 @@ test("marks incomplete source enumeration as partial", () => {
   });
   assert.equal(result.coverage.state, "partial");
   assert.equal(result.coverage.enumerationCompleteness, "partial");
+  assert.equal(result.cumulativeOwnerBalanceProfile.at(-1).cumulativeObservedBalanceShare, "100.000000");
 });
 
 test("rejects zero-balance-only authority leakage into the positive-balance population", () => {

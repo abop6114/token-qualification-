@@ -26,6 +26,16 @@ export interface RepeatedBalanceFrequency {
   ownerAuthorityCount: number;
 }
 
+export type OwnerBalanceProfilePercentile = 10 | 25 | 50 | 75 | 90 | 99 | 100;
+
+export interface CumulativeOwnerBalanceProfilePoint {
+  ownerPercentile: OwnerBalanceProfilePercentile;
+  includedOwnerAuthorityCount: number;
+  cumulativeObservedBalanceRaw: string;
+  /** Percentage of observedPositiveOwnerAuthorityBalanceRaw; null when that denominator is zero. */
+  cumulativeObservedBalanceShare: string | null;
+}
+
 export interface OwnerAuthorityBalanceDistribution {
   chain: string;
   assetAddress: string;
@@ -33,6 +43,10 @@ export interface OwnerAuthorityBalanceDistribution {
   observedOwnerAuthorityCount: number;
   decimals: number;
   currentSupplyRaw: string;
+  /** Exact sum of positive observed owner-authority balances; this is not mint or circulating supply. */
+  observedPositiveOwnerAuthorityBalanceRaw: string;
+  /** Cumulative low-balance profile over positive_owner_authorities, using the observed-balance denominator above. */
+  cumulativeOwnerBalanceProfile: CumulativeOwnerBalanceProfilePoint[];
   minimumBalanceRaw: string | null;
   maximumBalanceRaw: string | null;
   medianBalanceRaw: string | null;
