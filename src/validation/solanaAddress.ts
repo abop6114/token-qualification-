@@ -4,6 +4,35 @@ export function isBase58Syntax(value: string): boolean {
   return value.length > 0 && [...value].every((character) => BASE58_ALPHABET.includes(character));
 }
 
+/** Decode Base58 bytes without assigning Solana public-key semantics. */
+export function decodeBase58(value: string): Uint8Array | null {
+  if (!isBase58Syntax(value)) return null;
+
+  let decodedValue = 0n;
+  for (const character of value) {
+    decodedValue = decodedValue * 58n + BigInt(BASE58_ALPHABET.indexOf(character));
+  }
+
+  let leadingZeroBytes = 0;
+  while (value[leadingZeroBytes] === "1") leadingZeroBytes += 1;
+
+  const significantByteLength =
+    decodedValue === 0n ? 0 : Math.ceil(decodedValue.toString(16).length / 2);
+  const result = new Uint8Array(leadingZeroBytes + significantByteLength);
+  let remaining = decodedValue;
+  for (let index = result.length - 1; index >= leadingZeroBytes; index -= 1) {
+    result[index] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return result;
+}
+
+/** A Solana transaction signature is a Base58-encoded 64-byte signature. */
+export function isSolanaTransactionSignatureSyntax(value: string): boolean {
+  if (value.length < 64 || value.length > 88) return false;
+  return decodeBase58(value)?.byteLength === 64;
+}
+
 export function decodeSolanaPublicKey(value: string): Uint8Array | null {
   if (value.length < 32 || value.length > 44) return null;
   let decodedValue = 0n;
