@@ -2,9 +2,11 @@ import type { SolanaHistoricalAuthorityEvidence, SolanaHistoricalTransferObserva
 import type { SolanaHistoricalQueryPlan } from "../types/solanaHistoricalQueryPlan";
 import type {
   SolanaHistoricalAuthorityMetrics,
+  SolanaHistoricalAmountEvidenceProfile,
   SolanaHistoricalDescriptiveMetrics,
   SolanaHistoricalEndpointRelationshipCounts,
   SolanaHistoricalMetricValue,
+  SolanaHistoricalReportedAmountType,
   SolanaHistoricalTransferTypeCount,
 } from "../types/solanaHistoricalMetrics";
 import type { SolanaBoundedHistoricalSamplingEvidence } from "../types/solanaHistoricalSampling";
@@ -67,7 +69,7 @@ function assertPlanEvidenceConsistency(
     } else if (authority.queryStatus === "not_queried") {
       throw new Error("A selected historical authority is marked not queried in the evidence.");
     }
-    assertAuthorityEvidence(authority, plan.maxPagesPerAuthority, plan.maxRecordsPerAuthority);
+    assertAuthorityEvidence(authority, plan.maxPagesPerAuthority, plan.maxRecordsPerAuthority, evidence.mintAddress);
   }
 }
 
@@ -75,6 +77,7 @@ function assertAuthorityEvidence(
   authority: SolanaHistoricalAuthorityEvidence,
   maxPagesPerAuthority: number,
   maxRecordsPerAuthority: number,
+  mintAddress: string,
 ): void {
   if (!Array.isArray(authority.pages) || !Array.isArray(authority.observations)) {
     throw new Error("Historical authority evidence has malformed page or observation arrays.");
@@ -119,7 +122,7 @@ function assertAuthorityEvidence(
     if (pageObservations.length !== page.recordCount) {
       throw new Error("Historical page evidence does not match its observation slice.");
     }
-    for (const observation of pageObservations) assertObservationTimeConsistency(observation);
+    for (const observation of pageObservations) assertObservationTimeConsistency(observation, mintAddress);
     const usableTimes = pageObservations.flatMap((observation) =>
       observation.observedTime.status === "available" ? [observation.observedTime.unixSeconds] : []);
     const expectedFirst = usableTimes[0] ?? null;
@@ -186,7 +189,91 @@ function assertAuthorityEvidence(
 
 }
 
-function assertObservationTimeConsistency(observation: SolanaHistoricalTransferObservation): void {
+const reportedAmountTypes: readonly SolanaHistoricalReportedAmountType[] = [
+  "integer_string",
+  "non_integer_string",
+  "safe_integer_number",
+  "non_integer_number",
+  "unsafe_integer_number",
+  "null",
+  "missing",
+];
+
+function hasCanonicalNumberRepresentation(value: unknown, kind: "safe_integer" | "non_integer"): boolean {
+  if (typeof value !== "string") return false;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && String(parsed) === value &&
+    (kind === "safe_integer" ? Number.isSafeInteger(parsed) : !Number.isInteger(parsed));
+}
+
+function assertAmountEvidenceConsistency(amount: unknown): void {
+  if (typeof amount !== "object" || amount === null || Array.isArray(amount)) {
+    throw new Error("Historical evidence contains malformed amount evidence.");
+  }
+  const value = amount as Record<string, unknown>;
+  const amountType = value.reportedAmountType;
+  if (!reportedAmountTypes.includes(amountType as SolanaHistoricalReportedAmountType)) {
+    throw new Error("Historical evidence contains an unsupported reported amount type.");
+  }
+
+  const exact = amountType === "integer_string";
+  if (exact) {
+    if (
+      typeof value.rawAmount !== "string" || !/^[0-9]+$/.test(value.rawAmount) ||
+      value.exactRawAvailable !== true || value.exactnessBasis !== "provider_integer_string" ||
+      value.unavailableReason !== null || value.reportedAmount !== value.rawAmount
+    ) {
+      throw new Error("Historical evidence contains inconsistent exact raw amount evidence.");
+    }
+  } else {
+    const expectedReason = amountType === "null" || amountType === "missing"
+      ? "not_reported"
+      : "provider_representation_not_exact";
+    let reportedAmountIsValid = false;
+    switch (amountType) {
+      case "non_integer_string":
+        reportedAmountIsValid = typeof value.reportedAmount === "string" && value.reportedAmount.length > 0 && !/^[0-9]+$/.test(value.reportedAmount);
+        break;
+      case "safe_integer_number":
+        reportedAmountIsValid = hasCanonicalNumberRepresentation(value.reportedAmount, "safe_integer");
+        break;
+      case "non_integer_number":
+        reportedAmountIsValid = hasCanonicalNumberRepresentation(value.reportedAmount, "non_integer");
+        break;
+      case "unsafe_integer_number":
+      case "null":
+      case "missing":
+        reportedAmountIsValid = value.reportedAmount === null;
+        break;
+    }
+    if (
+      value.rawAmount !== null || value.exactRawAvailable !== false || value.exactnessBasis !== null ||
+      value.unavailableReason !== expectedReason || !reportedAmountIsValid
+    ) {
+      throw new Error("Historical evidence contains inconsistent non-exact amount evidence.");
+    }
+  }
+
+  const uiValue = value.reportedUiAmount;
+  switch (value.reportedUiAmountType) {
+    case undefined:
+      if (uiValue !== undefined) throw new Error("Historical evidence contains inconsistent UI amount evidence.");
+      break;
+    case "string":
+      if (typeof uiValue !== "string") throw new Error("Historical evidence contains inconsistent UI amount evidence.");
+      break;
+    case "number":
+      if (uiValue !== undefined) throw new Error("Historical evidence contains inconsistent UI amount evidence.");
+      break;
+    case "null":
+      if (uiValue !== null) throw new Error("Historical evidence contains inconsistent UI amount evidence.");
+      break;
+    default:
+      throw new Error("Historical evidence contains an unsupported UI amount type.");
+  }
+}
+
+function assertObservationTimeConsistency(observation: SolanaHistoricalTransferObservation, mintAddress: string): void {
   if (
     !observation || typeof observation !== "object" || !observation.providerRecord ||
     typeof observation.providerRecord.signature !== "string" || observation.providerRecord.signature.length === 0 ||
@@ -203,6 +290,15 @@ function assertObservationTimeConsistency(observation: SolanaHistoricalTransferO
   ) {
     throw new Error("Historical evidence contains malformed metric source fields.");
   }
+  const providerRecord = observation.providerRecord as SolanaHistoricalTransferObservation["providerRecord"] & { mint?: unknown };
+  if (
+    ("mint" in providerRecord && providerRecord.mint === undefined) ||
+    (providerRecord.mint !== undefined && providerRecord.mint !== null && typeof providerRecord.mint !== "string") ||
+    (typeof providerRecord.mint === "string" && providerRecord.mint !== mintAddress)
+  ) {
+    throw new Error("Historical observation mint is malformed or does not match the requested mint.");
+  }
+  assertAmountEvidenceConsistency(providerRecord.amount);
   const observedTime = observation.observedTime;
   if (observedTime.status === "available" && (!Number.isSafeInteger(observedTime.unixSeconds) || observedTime.unixSeconds < 0)) {
     throw new Error("Historical observation has a malformed normalized block time.");
@@ -265,6 +361,45 @@ function countEndpointRelationships(
   return counts;
 }
 
+function calculateAmountEvidenceProfile(
+  observations: SolanaHistoricalTransferObservation[],
+): SolanaHistoricalAmountEvidenceProfile {
+  const counts = new Map<SolanaHistoricalReportedAmountType, number>(reportedAmountTypes.map((type) => [type, 0]));
+  let exactRawAmountObservationCount = 0;
+  let minimum: bigint | null = null;
+  let maximum: bigint | null = null;
+  for (const observation of observations) {
+    const amount = observation.providerRecord.amount;
+    const type = amount.reportedAmountType;
+    counts.set(type, (counts.get(type) ?? 0) + 1);
+    if (amount.exactRawAvailable) {
+      exactRawAmountObservationCount += 1;
+      const raw = BigInt(amount.rawAmount);
+      minimum = minimum === null || raw < minimum ? raw : minimum;
+      maximum = maximum === null || raw > maximum ? raw : maximum;
+    }
+  }
+  const nonExactOrUnavailableAmountObservationCount = observations.length - exactRawAmountObservationCount;
+  const exactRawAmountCoverage = observations.length === 0 || exactRawAmountObservationCount === 0
+    ? "none"
+    : exactRawAmountObservationCount === observations.length ? "complete" : "partial";
+  return {
+    exactRawAmountObservationCount,
+    nonExactOrUnavailableAmountObservationCount,
+    reportedAmountTypeCounts: reportedAmountTypes.map((reportedAmountType) => ({
+      reportedAmountType,
+      count: counts.get(reportedAmountType) ?? 0,
+    })),
+    exactRawAmountCoverage,
+    minimumExactRawAmount: minimum?.toString() ?? null,
+    maximumExactRawAmount: maximum?.toString() ?? null,
+  };
+}
+
+function unavailableAmountProfile(reason: "not_queried" | "provider_error"): SolanaHistoricalMetricValue<never> {
+  return unavailable(reason);
+}
+
 function calculateAuthorityMetrics(authority: SolanaHistoricalAuthorityEvidence): SolanaHistoricalAuthorityMetrics {
   const base = {
     authorityAddress: authority.authorityAddress,
@@ -281,6 +416,7 @@ function calculateAuthorityMetrics(authority: SolanaHistoricalAuthorityEvidence)
       distinctSignatureCount: unavailable("not_queried"),
       reportedTransferTypeCounts: unavailable("not_queried"),
       reportedEndpointRelationshipCounts: unavailable("not_queried"),
+      amountEvidenceProfile: unavailableAmountProfile("not_queried"),
     };
   }
 
@@ -295,6 +431,7 @@ function calculateAuthorityMetrics(authority: SolanaHistoricalAuthorityEvidence)
       distinctSignatureCount: unavailable("provider_error"),
       reportedTransferTypeCounts: unavailable("provider_error"),
       reportedEndpointRelationshipCounts: unavailable("provider_error"),
+      amountEvidenceProfile: unavailableAmountProfile("provider_error"),
     };
   }
 
@@ -332,6 +469,7 @@ function calculateAuthorityMetrics(authority: SolanaHistoricalAuthorityEvidence)
       countEndpointRelationships(authority.authorityAddress, observations),
       completeness,
     ),
+    amountEvidenceProfile: available(calculateAmountEvidenceProfile(observations), completeness),
   };
 }
 

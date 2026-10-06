@@ -28,6 +28,31 @@ export interface SolanaHistoricalTransferTypeCount {
   count: number;
 }
 
+export type SolanaHistoricalReportedAmountType =
+  | "integer_string"
+  | "non_integer_string"
+  | "safe_integer_number"
+  | "non_integer_number"
+  | "unsafe_integer_number"
+  | "null"
+  | "missing";
+
+export interface SolanaHistoricalReportedAmountTypeCount {
+  reportedAmountType: SolanaHistoricalReportedAmountType;
+  count: number;
+}
+
+export interface SolanaHistoricalAmountEvidenceProfile {
+  exactRawAmountObservationCount: number;
+  nonExactOrUnavailableAmountObservationCount: number;
+  /** Includes every reportedAmountType in fixed discriminator order. */
+  reportedAmountTypeCounts: SolanaHistoricalReportedAmountTypeCount[];
+  /** Coverage of exact raw representation among retained observation rows only. */
+  exactRawAmountCoverage: "complete" | "partial" | "none";
+  minimumExactRawAmount: string | null;
+  maximumExactRawAmount: string | null;
+}
+
 export interface SolanaHistoricalAuthorityMetrics {
   authorityAddress: string;
   queryStatus: "success" | "provider_error" | "not_queried";
@@ -43,6 +68,7 @@ export interface SolanaHistoricalAuthorityMetrics {
   distinctSignatureCount: SolanaHistoricalMetricValue<number>;
   reportedTransferTypeCounts: SolanaHistoricalMetricValue<SolanaHistoricalTransferTypeCount[]>;
   reportedEndpointRelationshipCounts: SolanaHistoricalMetricValue<SolanaHistoricalEndpointRelationshipCounts>;
+  amountEvidenceProfile: SolanaHistoricalMetricValue<SolanaHistoricalAmountEvidenceProfile>;
 }
 
 export interface SolanaHistoricalSampleCoverage {
