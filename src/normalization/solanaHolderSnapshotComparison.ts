@@ -193,22 +193,32 @@ function validateSnapshot(snapshot: SolanaHolderSnapshotPayload): void {
   for (const n of TOP_N) {
     const metric = snapshot.concentration[`top${n}` as "top1" | "top5" | "top10" | "top20"] as HolderConcentration;
     assert(metric && metric.topN === n && metric.denominatorBasis === "current_mint_supply" && metric.denominatorRaw === snapshot.currentMintSupplyRaw, `top${n} denominator or identity is invalid`);
-    const unavailableReason = supplyInconsistent
-      ? "supply_inconsistency"
-      : coverage.state === "partial"
-        ? "unsupported_balance_affecting_extension"
-        : BigInt(snapshot.currentMintSupplyRaw) === 0n ? "zero_supply" : null;
-    if (unavailableReason !== null) {
-      assert(metric.status === "unavailable" && metric.numeratorRaw === null && metric.percentage === null && metric.reason === unavailableReason, `top${n} availability contradicts coverage`);
-    } else {
-      assert(metric.status === "available", `top${n} should be available`);
+    const zeroSupply = BigInt(snapshot.currentMintSupplyRaw) === 0n;
+    if (metric.status === "available") {
+      assert(!supplyInconsistent && !zeroSupply, `top${n} cannot be numerically available with inconsistent or zero supply`);
+      if (coverage.state === "partial") {
+        assert(coverage.reason === "unsupported_balance_affecting_extension" && hasUnsupported, `top${n} partial numeric evidence requires an unsupported-extension reason`);
+      }
       const numerator = expectedOwners.slice(0, n).reduce((sum, owner) => sum + BigInt(owner.balanceRaw), 0n).toString();
       assert(metric.numeratorRaw === numerator && metric.percentage === expectedPercentage(numerator, snapshot.currentMintSupplyRaw), `top${n} concentration does not reconcile`);
+    } else {
+      if (coverage.state === "partial" && !supplyInconsistent) {
+        assert(
+          coverage.reason === "unsupported_balance_affecting_extension" && hasUnsupported,
+          `top${n} unavailable concentration requires valid partial-coverage evidence`,
+        );
+      }
+      const expectedReason = supplyInconsistent
+        ? "supply_inconsistency"
+        : zeroSupply
+          ? "zero_supply"
+          : coverage.state === "partial" ? "unsupported_balance_affecting_extension" : null;
+      assert(metric.numeratorRaw === null && metric.percentage === null && expectedReason !== null && metric.reason === expectedReason, `top${n} availability contradicts coverage`);
     }
   }
 }
 
-function validateRecord(record: SolanaHolderSnapshotRecord): void {
+export function validateSolanaHolderSnapshotRecord(record: SolanaHolderSnapshotRecord): void {
   assert(record && record.schemaVersion === RECORD_VERSION, "unsupported record schema");
   assert(record.source && record.source.provider === "helius" && record.source.method === "getProgramAccountsV2" && record.source.commitment === "finalized", "source provenance is invalid");
   validateSnapshot(record.snapshot);
@@ -223,13 +233,22 @@ function unavailableReason(snapshot: SolanaHolderSnapshotPayload): "enumeration_
   return null;
 }
 
-function sideFor(snapshot: SolanaHolderSnapshotPayload, owner: string): SolanaSnapshotOwnerBalance {
+/** Pure resolver for already validated holder evidence. Callers validate the record at their public boundary. */
+export function resolveSolanaSnapshotOwnerBalance(
+  snapshot: SolanaHolderSnapshotPayload,
+  owner: string,
+): SolanaSnapshotOwnerBalance {
   const observed = snapshot.rawOwnerAuthorities.find((candidate) => candidate.ownerAddress === owner);
   if (observed) return { status: "positive_observed", balanceRaw: observed.balanceRaw };
   const reason = unavailableReason(snapshot);
   return reason
     ? { status: "unknown", balanceRaw: null, reason }
     : { status: "not_positive", balanceRaw: "0", basis: "complete_positive_owner_set" };
+}
+
+/** Completeness gate for metrics over a snapshot's positive-owner set. */
+export function getSolanaHolderEvidenceCompleteness(snapshot: SolanaHolderSnapshotPayload): "complete" | "partial" {
+  return unavailableReason(snapshot) === null ? "complete" : "partial";
 }
 
 function isKnown(side: SolanaSnapshotOwnerBalance): side is Extract<SolanaSnapshotOwnerBalance, { balanceRaw: string }> {
@@ -286,8 +305,8 @@ export function compareSolanaHolderSnapshots(
   earlier: SolanaHolderSnapshotRecord,
   later: SolanaHolderSnapshotRecord,
 ): SolanaHolderSnapshotComparison {
-  validateRecord(earlier);
-  validateRecord(later);
+  validateSolanaHolderSnapshotRecord(earlier);
+  validateSolanaHolderSnapshotRecord(later);
   const first = earlier.snapshot;
   const second = later.snapshot;
   assert(first.chain === second.chain, "chain mismatch");
@@ -303,13 +322,15 @@ export function compareSolanaHolderSnapshots(
     ...second.rawOwnerAuthorities.map((owner) => owner.ownerAddress),
   ])].sort();
   const authorities = addresses.map((authorityAddress): SolanaHolderAuthorityComparison => {
-    const earlierSide = sideFor(first, authorityAddress);
-    const laterSide = sideFor(second, authorityAddress);
+    const earlierSide = resolveSolanaSnapshotOwnerBalance(first, authorityAddress);
+    const laterSide = resolveSolanaSnapshotOwnerBalance(second, authorityAddress);
+    const evidenceCompleteness = getSolanaHolderEvidenceCompleteness(first) === "complete" &&
+      getSolanaHolderEvidenceCompleteness(second) === "complete" ? "complete" : "partial";
     const delta: SolanaSnapshotMetric<string> = isKnown(earlierSide) && isKnown(laterSide)
       ? {
           status: "available",
           value: (BigInt(laterSide.balanceRaw) - BigInt(earlierSide.balanceRaw)).toString(),
-          completeness: unavailableReason(first) || unavailableReason(second) ? "partial" : "complete",
+          completeness: evidenceCompleteness,
         }
       : { status: "unavailable", value: null, reason: earlierSide.status === "unknown" || laterSide.status === "unknown" ? "absence_not_proven" : "input_metric_unavailable" };
     return { authorityAddress, earlier: earlierSide, later: laterSide, transition: transition(earlierSide, laterSide), balanceDeltaRaw: delta };
@@ -318,9 +339,11 @@ export function compareSolanaHolderSnapshots(
   const countDelta: SolanaSnapshotMetric<number> = {
     status: "available",
     value: second.rawOwnerCount - first.rawOwnerCount,
-    completeness: unavailableReason(first) || unavailableReason(second) ? "partial" : "complete",
+    completeness: getSolanaHolderEvidenceCompleteness(first) === "complete" &&
+      getSolanaHolderEvidenceCompleteness(second) === "complete" ? "complete" : "partial",
   };
-  const concentrationCompleteness = unavailableReason(first) === null && unavailableReason(second) === null ? "complete" : "partial";
+  const concentrationCompleteness = getSolanaHolderEvidenceCompleteness(first) === "complete" &&
+    getSolanaHolderEvidenceCompleteness(second) === "complete" ? "complete" : "partial";
   const metric = (key: "top1" | "top5" | "top10" | "top20") =>
     concentrationDelta(first.concentration[key], second.concentration[key], concentrationCompleteness);
   return {
