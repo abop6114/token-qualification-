@@ -9,12 +9,28 @@ const ACCOUNT_BASE_SIZE = 165;
 const TYPE_OFFSET = 165;
 const TLV_OFFSET = 166;
 const MAX_U64 = 18446744073709551615n;
+const BASE_AUTHORITIES_UNSET = {
+  mintAuthority: { status: "unset", address: null },
+  freezeAuthority: { status: "unset", address: null },
+};
 
-function createMintBase({ initialized = true, supply = 123456789n, decimals = 6 } = {}) {
+function createMintBase({
+  initialized = true,
+  supply = 123456789n,
+  decimals = 6,
+  mintAuthorityTag = 0,
+  mintAuthorityBytes = Buffer.alloc(32),
+  freezeAuthorityTag = 0,
+  freezeAuthorityBytes = Buffer.alloc(32),
+} = {}) {
   const data = Buffer.alloc(MINT_BASE_SIZE);
+  data.writeUInt32LE(mintAuthorityTag, 0);
+  mintAuthorityBytes.copy(data, 4);
   data.writeBigUInt64LE(supply, 36);
   data[44] = decimals;
   data[45] = initialized ? 1 : 0;
+  data.writeUInt32LE(freezeAuthorityTag, 46);
+  freezeAuthorityBytes.copy(data, 50);
   return data;
 }
 
@@ -29,9 +45,10 @@ function createExtendedMint({
   extensionLength = 32,
   declaredLength = extensionLength,
   totalLength = TLV_OFFSET + 4 + extensionLength,
+  mintBaseOptions = {},
 } = {}) {
   const data = Buffer.alloc(totalLength);
-  createMintBase().copy(data, 0);
+  createMintBase(mintBaseOptions).copy(data, 0);
   data[TYPE_OFFSET] = 1;
   data.writeUInt16LE(extensionType, TLV_OFFSET);
   data.writeUInt16LE(declaredLength, TLV_OFFSET + 2);
@@ -57,7 +74,59 @@ test("recognizes a classic initialized 82-byte SPL Token mint", () => {
     tokenProgram: "spl-token",
     decimals: 6,
     rawSupply: "123456789",
+    baseAuthorities: BASE_AUTHORITIES_UNSET,
   });
+});
+
+test("normalizes classic SPL mint authority states from base COption tags", () => {
+  const knownAuthority = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1));
+  const bothUnset = normalize(SPL_TOKEN_PROGRAM_ID, createMintBase());
+  assert.deepEqual(bothUnset.baseAuthorities, BASE_AUTHORITIES_UNSET);
+
+  const mintSet = normalize(SPL_TOKEN_PROGRAM_ID, createMintBase({
+    mintAuthorityTag: 1,
+    mintAuthorityBytes: knownAuthority,
+  }));
+  assert.deepEqual(mintSet.baseAuthorities, {
+    mintAuthority: { status: "set", address: "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw" },
+    freezeAuthority: { status: "unset", address: null },
+  });
+
+  const freezeSet = normalize(SPL_TOKEN_PROGRAM_ID, createMintBase({
+    freezeAuthorityTag: 1,
+    freezeAuthorityBytes: knownAuthority,
+  }));
+  assert.deepEqual(freezeSet.baseAuthorities, {
+    mintAuthority: { status: "unset", address: null },
+    freezeAuthority: { status: "set", address: "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw" },
+  });
+
+  const bothSet = normalize(SPL_TOKEN_PROGRAM_ID, createMintBase({
+    mintAuthorityTag: 1,
+    mintAuthorityBytes: knownAuthority,
+    freezeAuthorityTag: 1,
+    freezeAuthorityBytes: Buffer.alloc(32, 1),
+  }));
+  assert.deepEqual(bothSet.baseAuthorities, {
+    mintAuthority: { status: "set", address: "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw" },
+    freezeAuthority: { status: "set", address: "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi" },
+  });
+});
+
+test("ignores nonzero authority payload bytes when a classic COption tag is unset", () => {
+  const result = normalize(SPL_TOKEN_PROGRAM_ID, createMintBase({
+    mintAuthorityBytes: Buffer.alloc(32, 0xa5),
+    freezeAuthorityBytes: Buffer.alloc(32, 0x5a),
+  }));
+  assert.deepEqual(result.baseAuthorities, BASE_AUTHORITIES_UNSET);
+});
+
+test("invalid classic mint authority COption tags retain not-a-mint behavior", () => {
+  expectNotMint(normalize(SPL_TOKEN_PROGRAM_ID, createMintBase({ mintAuthorityTag: 2 })));
+});
+
+test("invalid classic freeze authority COption tags retain not-a-mint behavior", () => {
+  expectNotMint(normalize(SPL_TOKEN_PROGRAM_ID, createMintBase({ freezeAuthorityTag: 2 })));
 });
 
 test("rejects a classic uninitialized mint", () => {
@@ -76,7 +145,28 @@ test("recognizes a Token-2022 82-byte mint without extensions", () => {
     tokenProgram: "token-2022",
     decimals: 6,
     rawSupply: "123456789",
+    baseAuthorities: BASE_AUTHORITIES_UNSET,
   });
+});
+
+test("decodes Token-2022 base mint authorities without interpreting extensions", () => {
+  const knownAuthority = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1));
+  const data = createExtendedMint({
+    mintBaseOptions: {
+      mintAuthorityTag: 1,
+      mintAuthorityBytes: knownAuthority,
+      freezeAuthorityTag: 1,
+      freezeAuthorityBytes: Buffer.alloc(32, 1),
+    },
+  });
+  const result = normalize(TOKEN_2022_PROGRAM_ID, data);
+  assert.deepEqual(result.baseAuthorities, {
+    mintAuthority: { status: "set", address: "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw" },
+    freezeAuthority: { status: "set", address: "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi" },
+  });
+  assert.equal(result.tokenProgram, "token-2022");
+  assert.equal(result.rawSupply, "123456789");
+  assert.equal(result.decimals, 6);
 });
 
 test("recognizes an extended Token-2022 mint with common-base padding and TLV data", () => {
@@ -88,6 +178,7 @@ test("recognizes an extended Token-2022 mint with common-base padding and TLV da
     tokenProgram: "token-2022",
     decimals: 6,
     rawSupply: "123456789",
+    baseAuthorities: BASE_AUTHORITIES_UNSET,
   });
 });
 

@@ -1,5 +1,6 @@
 import type { RawSolanaAccount } from "../providers/solana/heliusRpc";
 import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../types/solana";
+import { encodeSolanaPublicKey } from "../validation/solanaAddress";
 import {
   parseToken2022MintExtensionTypes,
   parseToken2022TokenAccountExtensionTypes,
@@ -15,6 +16,10 @@ const TOKEN_2022_MULTISIG_SIZE = 355;
 
 export type { TokenProgram } from "../types/solana";
 
+export type SolanaBaseAuthorityEvidence =
+  | { status: "set"; address: string }
+  | { status: "unset"; address: null };
+
 export type SolanaMintResolution =
   | { exists: false; isMint: false }
   | { exists: true; isMint: false }
@@ -24,6 +29,11 @@ export type SolanaMintResolution =
       tokenProgram: TokenProgram;
       decimals: number;
       rawSupply: string;
+      /** SPL base mint fields only; this is not complete Token-2022 authority/security coverage. */
+      baseAuthorities: {
+        mintAuthority: SolanaBaseAuthorityEvidence;
+        freezeAuthority: SolanaBaseAuthorityEvidence;
+      };
     };
 
 function decodeBase64(value: string): Uint8Array {
@@ -45,6 +55,15 @@ function decodeBase64(value: string): Uint8Array {
 function hasValidCOptionTag(data: Uint8Array, offset: number): boolean {
   const tag = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(offset, true);
   return tag === 0 || tag === 1;
+}
+
+function normalizeBaseAuthority(data: Uint8Array, tagOffset: number): SolanaBaseAuthorityEvidence {
+  const tag = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(tagOffset, true);
+  if (tag === 0) return { status: "unset", address: null };
+  return {
+    status: "set",
+    address: encodeSolanaPublicKey(data.subarray(tagOffset + 4, tagOffset + 36)),
+  };
 }
 
 function isInitializedMintBase(data: Uint8Array): boolean {
@@ -141,6 +160,10 @@ function normalizeMint(data: Uint8Array, tokenProgram: TokenProgram): SolanaMint
     tokenProgram,
     decimals: data[44],
     rawSupply,
+    baseAuthorities: {
+      mintAuthority: normalizeBaseAuthority(data, 0),
+      freezeAuthority: normalizeBaseAuthority(data, 46),
+    },
   };
 }
 
