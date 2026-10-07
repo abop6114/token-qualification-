@@ -295,7 +295,16 @@ test("timeout is enforced by the Helius adapter and becomes sanitized provider_e
       now: fixedClock,
       fetchPage: (request, timeoutMs) => getHeliusHistoricalTransferPage(request, timeoutMs, (_url, init) =>
         new Promise((_, reject) => {
-          init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
+          const keepAlive = setTimeout(() => {}, 100);
+
+          init.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(keepAlive);
+              reject(init.signal.reason);
+            },
+            { once: true },
+          );
         })),
     });
     const authority = result.evidence.authorities.find((item) => item.queryStatus === "provider_error");
