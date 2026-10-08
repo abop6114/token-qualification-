@@ -7,9 +7,9 @@
 ## 2. Current checkpoint
 
 - Branch: `main`
-- HEAD and `origin/main`: `eb5417a` — `feat: add deterministic EVM balance distribution`
-- The repository was clean when inspected for this handoff.
-- Current validation: `npm test` passed, including its TypeScript build: **368 tests passed, 0 failed**.
+- HEAD and `origin/main`: `0e43876` — `feat: add deterministic Solana holder exclusion assessment`
+- The repository is clean at this checkpoint.
+- Current validation: `npm test` passed, including its TypeScript build: **422 tests passed, 0 failed**; the separate TypeScript build passed.
 - The project began as a Solana-first CLI/JSON prototype. Committed Base/Ethereum work is an evidence-feasibility extension; it is not EVM CLI/product integration.
 
 ## 3. Product objective
@@ -49,6 +49,18 @@ The committed Solana path includes:
 - Immutable holder snapshots, two-snapshot comparison, and multi-snapshot observed persistence evidence. Absence-to-zero is gated by complete evidence; captures do not imply continuous ownership.
 - Development-only Helius transfer-history and single-transaction feasibility probes remain separate from ordinary CLI behavior.
 
+**Step 5A — deterministic address-role evidence** (`0f113e6 feat: add deterministic Solana address role evidence`): the `SolanaAddressRoleEvidence` sidecar records exact address correlations for `base_mint_authority_address`, `base_freeze_authority_address`, and `dexscreener_reported_pool_address`. It adds no provider calls, exclusions, or adjusted concentration, and does not mutate raw holder evidence. Successful mint resolution carries the requested canonical mint address so role evidence cannot combine a different mint resolution with holder or market evidence.
+
+Step 5A records address equality only. DEX Screener `pairAddress` is normalized as `poolAddress`, but current evidence does not establish that it is a reserve vault, SPL token owner authority, LP balance, or economically excludable balance. A pool-address equality is only the narrow factual relationship represented by Step 5A.
+
+**Step 5B-1 — versioned exclusion assessment** (`0e43876 feat: add deterministic Solana holder exclusion assessment`): `SolanaHolderExclusionAssessment` applies the fixed `solana-address-exclusion-policy-v1` to the Step 5A role evidence. It adds no provider/API calls. Its decisions are `exclude`, `retain`, and `unresolved`; evidence sufficiency is `sufficient`, `insufficient`, or `conflicting`. `retain` means only “not excluded by this policy.” It does not mean ordinary holder, investor, organic holder, independent holder, or economic owner. `unresolved` preserves role matches with insufficient evidence and conflicting evidence without treating either as a positive or negative holder classification.
+
+No current Step 5B-1 rule emits `exclude`. Exact mint-authority equality, freeze-authority equality, and DEX pool-address equality each remain unresolved/insufficient. DEX conflicts remain unresolved/conflicting; unavailable or malformed evidence remains unresolved. Only a clean, validated no-match can produce `retain` / `sufficient` / `no_supported_exclusion_rule_matched`, meaning the current versioned policy found no supported exclusion rule in the examined evidence. Aggregate precedence is `exclude > unresolved > retain`.
+
+Before assessment, Step 5B-1 validates chain and mint identity, exact positive-owner-authority subject-set correspondence, capture/enumeration/amount-coverage metadata, market-source discriminants and provenance, supplied-pool counts, and role-finding/source consistency. It also validates amount-coverage relationships. Malformed or contradictory evidence is rejected rather than converted into favorable policy output. DEX no-match validation applies only to the internally consistent supplied snapshot; it does not establish provider-wide or market-wide completeness.
+
+Raw holder evidence remains first-class: raw balances and raw concentration are unchanged. Step 5B-1 is a sidecar assessment; there is no adjusted population or adjusted concentration yet.
+
 These are evidence primitives, not completed holder-quality classifications, qualification scoring, or AI interpretation.
 
 ## 7. Implemented EVM feasibility capabilities
@@ -85,20 +97,23 @@ Prior feasibility work reported successful small controlled GoldRush holder enum
 
 ## 10. Validation and testing posture
 
-Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At this checkpoint the verified full suite is **368 passing tests**; `npm test` also runs the TypeScript build.
+Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At this checkpoint the verified full suite is **422 passing tests**; `npm test` also runs the TypeScript build.
 
 ## 11. Cost and operating constraints
 
-Preserve Project Context V1 constraints: the normal development/early-beta target is **below approximately $200/month** and the hard architectural operating envelope is **$600/month**. These are project budget constraints, not provider price guarantees.
+Preserve Project Context V1 constraints: the normal development/early-beta operating target is **below $200/month** and the hard architectural operating envelope is **$600/month**. These are project budget constraints, not provider price guarantees.
 
 Prefer progressive analysis, bounded queries and sampling, metric-specific caching/reuse, and per-provider usage/cost telemetry. Avoid unbounded per-wallet/signature fanout and unnecessary AI calls for objective facts. Public/beta precedes payment; actual cost and usage should inform later controls.
+
+Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Step 5A and Step 5B-1 added zero provider/API calls.
 
 ## 12. Explicitly deferred / not implemented
 
 The following are not current product conclusions or implemented classifications:
 
 - Token-2022 extension-specific authority/control analysis; authority revocation/change history; multisig or control interpretation.
-- LP/DEX/pool/treasury/team role identification, exclusions, and adjusted concentration.
+- Actual balance exclusions; adjusted holder population; adjusted concentration.
+- DEX-specific pool/vault decoding; burn/unspendable, treasury/team/dev, custodial/exchange, vesting/escrow, and bridge classification.
 - Dust thresholds; economically meaningful or qualified holder definitions; active, organic, or artificial-holder estimates.
 - Funding relationships, common-funder analysis, wallet clustering, and wallet quality.
 - EVM DEX market entry; EVM CLI integration; EVM proxy/admin/privileged-function and broader security analysis.
@@ -108,13 +123,15 @@ The following are not current product conclusions or implemented classifications
 
 Descriptive evidence already present must not be mislabeled as any of these later conclusions.
 
+Cash Cat, Super Cat, and SANTA remain reference/validation cases only; they are not permanent production scoring benchmarks.
+
 ## 13. Next architectural boundary
 
-The current sequence for discussion is:
+**Step 5B-2 — adjusted ownership/population view: NOT IMPLEMENTED and NOT YET METHODOLOGICALLY FINALIZED.** The likely boundary consumes raw holder evidence plus the Step 5B-1 assessment, binds each `subjectAddress` and exact `balanceRaw` to the holder snapshot it consumes, and reports auditable totals by decision reconciled against raw evidence. Unresolved subjects remain preserved unless a later explicit, approved policy says otherwise. This step must not silently introduce exclusions or adjusted concentration.
 
-**Step 4 holder distribution → address-role/exclusion evidence → adjusted ownership/concentration → dust/meaningful-balance evidence → historical/acquisition/activity evidence → qualified/estimated-organic holders**
+**Step 5B-3 — adjusted concentration: DEFERRED.** Denominator semantics require explicit methodology approval. At least two different questions remain possible: retained Top-N balances divided by original current mint supply, or retained Top-N balances divided by retained balance total. Do not select between them in implementation planning without approval, and do not assume adjusted concentration will affect qualification scoring.
 
-This is a discussion sequence, not an approved implementation roadmap or final Step 5. The next development thread should review it against the product objective and evidence available before implementation.
+Future work remains subject to reconnaissance, evidence review, bounded implementation, and explicit methodology approval where required. This handoff records the next likely boundary, not authorization to change qualification methodology or scoring.
 
 ## 14. Development workflow
 
@@ -123,6 +140,8 @@ This is a discussion sequence, not an approved implementation roadmap or final S
 - GitHub: `abop6114/token-qualification-`; primary branch: `main`.
 - Secrets belong only in `.env`; never commit or display them.
 - Development commonly pairs Codex implementation/review with ChatGPT architectural review. Work one bounded change at a time.
+- Perform reconnaissance before architectural or provider changes; review each bounded change before commit and maintain one checkpoint at a time.
+- Do not make silent methodology changes.
 - Do not commit review scratch artifacts. Commit only after the explicit review gate.
 
 ## 15. Fresh-thread startup instruction
