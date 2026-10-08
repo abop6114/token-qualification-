@@ -4,6 +4,8 @@ const RPC_REQUEST_ID = 1;
 type JsonObject = Record<string, unknown>;
 
 export interface RawSolanaAccount {
+  /** The address requested by this getAccountInfo call; the RPC account value does not repeat its key. */
+  requestedAddress: string;
   owner: string;
   dataBase64: string;
 }
@@ -97,6 +99,7 @@ export async function getSolanaAccount(address: string): Promise<RawSolanaAccoun
   }
 
   return {
+    requestedAddress: address,
     owner: result.value.owner,
     dataBase64: accountData[0],
   };

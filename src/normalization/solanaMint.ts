@@ -1,6 +1,6 @@
 import type { RawSolanaAccount } from "../providers/solana/heliusRpc";
 import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../types/solana";
-import { encodeSolanaPublicKey } from "../validation/solanaAddress";
+import { encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 import {
   parseToken2022MintExtensionTypes,
   parseToken2022TokenAccountExtensionTypes,
@@ -26,6 +26,8 @@ export type SolanaMintResolution =
   | {
       exists: true;
       isMint: true;
+      /** Address requested from getAccountInfo; not an independent provider attestation. */
+      mintAddress: string;
       tokenProgram: TokenProgram;
       decimals: number;
       rawSupply: string;
@@ -150,13 +152,14 @@ export function getSolanaMintExtensionTypes(
   return extensionTypes;
 }
 
-function normalizeMint(data: Uint8Array, tokenProgram: TokenProgram): SolanaMintResolution {
+function normalizeMint(data: Uint8Array, tokenProgram: TokenProgram, mintAddress: string): SolanaMintResolution {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const rawSupply = view.getBigUint64(36, true).toString(10);
 
   return {
     exists: true,
     isMint: true,
+    mintAddress,
     tokenProgram,
     decimals: data[44],
     rawSupply,
@@ -174,11 +177,15 @@ export function normalizeSolanaMintAccount(
     return { exists: false, isMint: false };
   }
 
+  if (!isSolanaPublicKeySyntax(account.requestedAddress)) {
+    throw new Error("Requested Solana account address is malformed.");
+  }
+
   if (account.owner === SOLANA_TOKEN_PROGRAM_IDS["spl-token"]) {
     const data = decodeBase64(account.dataBase64);
 
     return data.byteLength === MINT_BASE_SIZE && isInitializedMintBase(data)
-      ? normalizeMint(data, "spl-token")
+      ? normalizeMint(data, "spl-token", account.requestedAddress)
       : { exists: true, isMint: false };
   }
 
@@ -188,7 +195,7 @@ export function normalizeSolanaMintAccount(
     const isTokenAccount = isToken2022TokenAccount(data);
 
     return isMint && !isTokenAccount
-      ? normalizeMint(data, "token-2022")
+      ? normalizeMint(data, "token-2022", account.requestedAddress)
       : { exists: true, isMint: false };
   }
 

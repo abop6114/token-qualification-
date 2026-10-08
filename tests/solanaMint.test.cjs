@@ -57,6 +57,7 @@ function createExtendedMint({
 
 function normalize(owner, data) {
   return normalizeSolanaMintAccount({
+    requestedAddress: "5CuomWu7HfqcR9z2NZ1QN7HJmRGwyp4JrFQ6SWmntaJP",
     owner,
     dataBase64: data.toString("base64"),
   });
@@ -71,11 +72,21 @@ test("recognizes a classic initialized 82-byte SPL Token mint", () => {
   assert.deepEqual(result, {
     exists: true,
     isMint: true,
+    mintAddress: "5CuomWu7HfqcR9z2NZ1QN7HJmRGwyp4JrFQ6SWmntaJP",
     tokenProgram: "spl-token",
     decimals: 6,
     rawSupply: "123456789",
     baseAuthorities: BASE_AUTHORITIES_UNSET,
   });
+});
+
+test("validates the requested mint address and preserves nonexistent-account output", () => {
+  assert.throws(() => normalizeSolanaMintAccount({
+    requestedAddress: "not-a-public-key",
+    owner: SPL_TOKEN_PROGRAM_ID,
+    dataBase64: createMintBase().toString("base64"),
+  }), /Requested Solana account address is malformed/);
+  assert.deepEqual(normalizeSolanaMintAccount(null), { exists: false, isMint: false });
 });
 
 test("normalizes classic SPL mint authority states from base COption tags", () => {
@@ -142,6 +153,7 @@ test("recognizes a Token-2022 82-byte mint without extensions", () => {
   assert.deepEqual(result, {
     exists: true,
     isMint: true,
+    mintAddress: "5CuomWu7HfqcR9z2NZ1QN7HJmRGwyp4JrFQ6SWmntaJP",
     tokenProgram: "token-2022",
     decimals: 6,
     rawSupply: "123456789",
@@ -175,6 +187,7 @@ test("recognizes an extended Token-2022 mint with common-base padding and TLV da
   assert.deepEqual(result, {
     exists: true,
     isMint: true,
+    mintAddress: "5CuomWu7HfqcR9z2NZ1QN7HJmRGwyp4JrFQ6SWmntaJP",
     tokenProgram: "token-2022",
     decimals: 6,
     rawSupply: "123456789",

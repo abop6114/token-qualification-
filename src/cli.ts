@@ -69,7 +69,8 @@ async function main(): Promise<void> {
         rawOwnerCount: holderStructure.rawOwnerCount,
         rawOwnerAuthorities: holderStructure.rawOwnerAuthorities,
       });
-      console.log(JSON.stringify({ chain: "solana", mintAddress, status, ...resolution, market, holderStructure, ownerAuthorityBalanceDistribution }));
+      const { mintAddress: resolvedMintAddress, ...mintEvidence } = resolution;
+      console.log(JSON.stringify({ chain: "solana", mintAddress: resolvedMintAddress, status, ...mintEvidence, market, holderStructure, ownerAuthorityBalanceDistribution }));
       return;
     }
 
