@@ -7,9 +7,9 @@
 ## 2. Current checkpoint
 
 - Branch: `main`
-- HEAD and `origin/main` are synchronized at `9bdbfaa` — `feat: add deterministic Solana not-excluded population evidence`
+- HEAD and `origin/main` are synchronized at `20ee0e5` — `feat: add deterministic Solana not-excluded concentration evidence`
 - The repository was clean at this checkpoint; this documentation refresh is the only intended working-tree change.
-- Current validation at the checkpoint: `npm test` passed, including its TypeScript build: **443 tests passed, 0 failed**; the separate TypeScript build passed.
+- Current validation at the checkpoint: `npm test` passed, including its TypeScript build: **466 tests passed, 0 failed**; the separate TypeScript build passed.
 - The project began as a Solana-first CLI/JSON prototype. Committed Base/Ethereum work is an evidence-feasibility extension; it is not EVM CLI/product integration.
 
 ## 3. Product objective
@@ -59,7 +59,7 @@ No current Step 5B-1 rule emits `exclude`. Exact mint-authority equality, freeze
 
 Before assessment, Step 5B-1 validates chain and mint identity, exact positive-owner-authority subject-set correspondence, capture/enumeration/amount-coverage metadata, market-source discriminants and provenance, supplied-pool counts, and role-finding/source consistency. It also validates amount-coverage relationships. Malformed or contradictory evidence is rejected rather than converted into favorable policy output. DEX no-match validation applies only to the internally consistent supplied snapshot; it does not establish provider-wide or market-wide completeness.
 
-Raw holder evidence remains first-class: raw balances and raw concentration are unchanged. Step 5B-1 is a sidecar assessment. Step 5B-2 now derives an auditable not-excluded population, but does not produce adjusted concentration.
+Raw holder evidence remains first-class: raw balances and raw concentration are unchanged. Step 5B-1 is a sidecar assessment. Step 5B-2 derives an auditable not-excluded population, and Step 5B-3 adds separate deterministic concentration views over that population.
 
 **Step 5B-2 — not-excluded owner-authority population evidence** (`9bdbfaa feat: add deterministic Solana not-excluded population evidence`): `SolanaNotExcludedOwnerAuthorityPopulationEvidence` combines a validated `SolanaHolderSnapshotRecord` with its `SolanaHolderExclusionAssessment`. It binds assessment subjects to the exact snapshot population using exact `subjectAddress` and canonical `balanceRaw` matches, uniqueness/set correspondence, consistent shared snapshot metadata, and decision consistency. The snapshot's existing `snapshotId` remains the provenance identifier; the assessment itself does not introduce a snapshot ID or imply that independently supplied IDs matched.
 
@@ -68,6 +68,21 @@ The population semantics remain **observed positive Solana owner authorities**, 
 Partial amount coverage and supply inconsistency—including a negative supply difference—do not prevent exact partitioning of observed rows. Their original evidence states remain intact and are never upgraded. Empty observed populations are supported. This milestone adds no provider or AI calls, exclusions, adjusted concentration, or mutation of raw holder evidence.
 
 These are evidence primitives, not completed holder-quality classifications, qualification scoring, or AI interpretation.
+
+**Step 5B-3 — not-excluded owner-authority concentration evidence** (`20ee0e5 feat: add deterministic Solana not-excluded concentration evidence`): `SolanaNotExcludedOwnerAuthorityConcentrationEvidence` consumes Step 5B-2 evidence only and makes no provider calls. Its pipeline is:
+
+`SolanaHolderSnapshotRecord` / holder evidence → `SolanaAddressRoleEvidence` → `SolanaHolderExclusionAssessment` → `SolanaNotExcludedOwnerAuthorityPopulationEvidence` → `SolanaNotExcludedOwnerAuthorityConcentrationEvidence`.
+
+It reports two distinct Top-N views after ranking the not-excluded population anew by descending exact raw balance, with canonical address as the tie-break. Both use Top 1, 5, 10, and 20, `BigInt` arithmetic, and six-decimal half-up percentage rounding. Results are deterministic and provider-free.
+
+- **`notExcludedTopNCurrentMintSupplyShare` (Metric A):** numerator is the post-exclusion, reranked Top-N not-excluded observed balance; denominator is original current mint supply. Percentages are available only with complete enumeration, complete amount coverage, positive supply, and no supply inconsistency. Holder pages and mint supply are not proven atomically aligned, which remains explicit in provenance. A valid empty not-excluded population with positive, consistent supply can produce exact zero shares.
+- **`notExcludedObservedPopulationTopNShare` (Metric B):** numerator is the same reranked Top-N balance; denominator is the total observed not-excluded balance. It describes concentration within that observed population. With a positive denominator, numeric percentages remain available with `completeness: "partial"` when source amount coverage is partial or supply is inconsistent. Partial reasons reflect validated Step 5B-2 evidence; unsupported extensions and supply inconsistency may both be present. A zero observed not-excluded denominator makes this view unavailable, not zero.
+
+The current v1 exclusion policy cannot emit `exclude`, so **`notExcluded = raw`** under this policy. Metric A can therefore numerically equal raw supply-denominated concentration when equivalent availability gates are met; Metric B generally differs because its denominator is observed not-excluded balance rather than mint supply. This is a current-policy identity relationship, not a permanent scoring or methodology assumption. Step 5B-3 preserves raw concentration and does not change the exclusion policy.
+
+The Step 5B-3 contract is intentionally Solana-specific. It introduces neither an EVM equivalent nor a global normalized concentration interface.
+
+These remain descriptive evidence primitives, not holder-quality classifications, qualification scoring, or AI interpretation.
 
 ## 7. Implemented EVM feasibility capabilities
 
@@ -112,7 +127,7 @@ These are non-blocking design observations, not requests for immediate refactori
 
 ## 11. Validation and testing posture
 
-Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At this checkpoint the verified full suite is **443 passing tests**; `npm test` also runs the TypeScript build.
+Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At this checkpoint the verified full suite is **466 passing tests**; `npm test` also runs the TypeScript build.
 
 ## 12. Cost and operating constraints
 
@@ -120,7 +135,7 @@ Preserve Project Context V1 constraints: the normal development/early-beta opera
 
 Prefer progressive analysis, bounded queries and sampling, metric-specific caching/reuse, and per-provider usage/cost telemetry. Avoid unbounded per-wallet/signature fanout and unnecessary AI calls for objective facts. Public/beta precedes payment; actual cost and usage should inform later controls.
 
-Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, and 5B-2 added zero provider/API calls. Solana token-account enumeration currently continues until explicit provider pagination termination and has no configured page/record cap; this is a future cost/latency consideration for very large tokens, not a change authorized by the completed milestones.
+Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Solana token-account enumeration currently continues until explicit provider pagination termination and has no configured page/record cap; this is a tracked future cost/latency risk for very large tokens, not a change authorized by the completed milestones.
 
 ## 13. Explicitly deferred / not implemented
 
@@ -128,6 +143,10 @@ The following are not current product conclusions or implemented classifications
 
 - Token-2022 extension-specific authority/control analysis; authority revocation/change history; multisig or control interpretation.
 - Rules that actually emit balance exclusions and adjusted concentration. Step 5B-2 provides a not-excluded observed population; because current v1 policy emits no exclusions, it currently equals the raw observed population.
+- A retain-only concentration view remains deferred; Step 5B-3 provides the two not-excluded views and does not add a separate retain-only metric.
+- EVM equivalent not-excluded concentration evidence and a global normalized concentration interface remain deferred; no Step 5B-3 contract or cross-chain concentration equivalence is implied.
+- An assessment content fingerprint/ID remains deferred; the holder snapshot ID identifies the source capture, not the exclusion assessment content.
+- The raw holder snapshot producer/validator partial-coverage compatibility discrepancy remains separate technical debt; Steps 5B-2 and 5B-3 do not resolve it.
 - DEX-specific pool/vault decoding; burn/unspendable, treasury/team/dev, custodial/exchange, vesting/escrow, and bridge classification.
 - Dust thresholds; economically meaningful or qualified holder definitions; active, organic, or artificial-holder estimates.
 - Funding relationships, common-funder analysis, wallet clustering, and wallet quality.
@@ -142,18 +161,11 @@ Cash Cat, Super Cat, and SANTA remain reference/validation cases only; they are 
 
 ## 14. Next architectural boundary
 
-**Step 5B-2 — not-excluded population evidence: IMPLEMENTED at `9bdbfaa`.** It consumes the immutable holder snapshot and Step 5B-1 assessment, validates exact subject/balance correspondence, and reports an auditable partition. It does not change raw evidence or calculate adjusted concentration.
+**Step 5B-2 — not-excluded population evidence: IMPLEMENTED.** It consumes the immutable holder snapshot and Step 5B-1 assessment, validates exact subject/balance correspondence, and reports an auditable partition. It does not change raw evidence or calculate concentration.
 
-**Step 5B-3 — adjusted concentration: NOT IMPLEMENTED; METHODOLOGY APPROVAL REQUIRED.** Before implementation, explicitly approve which descriptive question(s) the metrics answer. At minimum, these are distinct candidates and could coexist as separate metrics; neither is approved yet:
+**Step 5B-3 — not-excluded concentration evidence: IMPLEMENTED at `20ee0e5`.** It consumes Step 5B-2 evidence and reports separate current-mint-supply and observed-not-excluded-population Top-N views under the availability and completeness semantics recorded above. It makes no provider calls, does not mutate raw concentration, and does not change the exclusion policy.
 
-1. **Not-excluded Top-N balance / original current mint supply:** what fraction of current supply is represented by the observed not-excluded top group?
-2. **Not-excluded Top-N balance / not-excluded observed balance total:** how concentrated is the observed not-excluded population internally?
-
-The decision must specify denominator semantics, population, unresolved-subject treatment, evidence coverage, observation compatibility, and presentation. Do not choose or implement a denominator before that methodology approval, and do not assume any result changes qualification scoring.
-
-The next boundary is therefore **Step 5B-3 methodology decision / reconnaissance only**. No implementation should begin until those semantics are approved. Later candidates may include bounded Solana Step 5B-3 implementation if approved, EVM evidence assembly/orchestration, and reconnaissance of EVM role/exclusion evidence; their sequence is not fixed here.
-
-Future work remains subject to reconnaissance, evidence review, bounded implementation, and explicit methodology approval where required. This handoff records the next likely boundary, not authorization to change qualification methodology or scoring.
+After this documentation refresh, select the next engineering step deliberately from the remaining roadmap. This handoff does not claim that a next feature has been selected or approved. In particular, the existence of concentration evidence does not authorize scoring or qualification integration. Future work remains subject to reconnaissance, evidence review, bounded implementation, and explicit methodology approval where required.
 
 ## 15. Development workflow
 
