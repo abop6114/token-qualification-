@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { HolderConcentration, SolanaHolderStructure } from "../types/holders";
+import type { HolderConcentration, SolanaHolderStructure, SolanaPartialHolderStructure } from "../types/holders";
 import type {
   DeepReadonly,
   SolanaConcentrationDelta,
@@ -7,6 +7,12 @@ import type {
   SolanaHolderSnapshotComparison,
   SolanaHolderSnapshotPayload,
   SolanaHolderSnapshotRecord,
+  SolanaHolderSnapshotAcquisitionV2,
+  SolanaHolderSnapshotPayloadV2,
+  SolanaHolderSnapshotRecordV2,
+  SolanaHolderSnapshotRecordVersioned,
+  SolanaHolderSnapshotComparisonV2,
+  PartialHolderConcentrationV2,
   SolanaHolderSnapshotSource,
   SolanaSnapshotMetric,
   SolanaSnapshotOwnerBalance,
@@ -15,6 +21,8 @@ import { isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 
 const RECORD_VERSION = "solana-holder-snapshot-record-v1" as const;
 const COMPARISON_VERSION = "solana-holder-snapshot-comparison-v1" as const;
+const RECORD_VERSION_V2 = "solana-holder-snapshot-record-v2" as const;
+const COMPARISON_VERSION_V2 = "solana-holder-snapshot-comparison-v2" as const;
 const DEFAULT_SOURCE: SolanaHolderSnapshotSource = {
   provider: "helius",
   method: "getProgramAccountsV2",
@@ -24,9 +32,16 @@ const TOP_N = [1, 5, 10, 20] as const;
 const NONNEGATIVE_INTEGER = /^(0|[1-9][0-9]*)$/;
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const SIGNED_INTEGER = /^(0|[1-9][0-9]*|-[1-9][0-9]*)$/;
+const V2_PARTIAL_STOP_REASONS = new Set(["page_cap", "request_timeout", "provider_error", "malformed_response"]);
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Invalid Solana holder snapshot: ${message}`);
+}
+
+function assertExactKeys(value: unknown, expected: readonly string[], description: string): void {
+  assert(value !== null && typeof value === "object" && !Array.isArray(value), `${description} is malformed`);
+  const actual = Object.keys(value as Record<string, unknown>).sort();
+  assert(actual.length === expected.length && actual.every((key, index) => key === [...expected].sort()[index]), `${description} contains unexpected fields`);
 }
 
 function isSafeCount(value: unknown): value is number {
@@ -80,11 +95,31 @@ function canonicalProjection(snapshot: SolanaHolderSnapshotPayload, source: Sola
   return JSON.stringify(projection);
 }
 
+function canonicalProjectionV2(
+  snapshot: SolanaHolderSnapshotPayloadV2,
+  source: SolanaHolderSnapshotSource,
+  acquisition: SolanaHolderSnapshotAcquisitionV2,
+): string {
+  return JSON.stringify([
+    RECORD_VERSION_V2,
+    [acquisition.completeness, acquisition.stopReason, acquisition.configuredMaxPages, acquisition.requestedPageSize],
+    JSON.parse(canonicalProjection(snapshot as unknown as SolanaHolderSnapshotPayload, source)),
+  ]);
+}
+
 export function calculateSolanaHolderSnapshotId(
   snapshot: SolanaHolderSnapshotPayload,
   source: SolanaHolderSnapshotSource = DEFAULT_SOURCE,
 ): string {
   return `sha256:${createHash("sha256").update(canonicalProjection(snapshot, source), "utf8").digest("hex")}`;
+}
+
+export function calculateSolanaHolderSnapshotIdV2(
+  snapshot: SolanaHolderSnapshotPayloadV2,
+  source: SolanaHolderSnapshotSource,
+  acquisition: SolanaHolderSnapshotAcquisitionV2,
+): string {
+  return `sha256:${createHash("sha256").update(canonicalProjectionV2(snapshot, source, acquisition), "utf8").digest("hex")}`;
 }
 
 export function createSolanaHolderSnapshotRecord(
@@ -114,6 +149,121 @@ function cloneAndFreeze<T>(value: T): DeepReadonly<T> {
   return freeze(clone) as DeepReadonly<T>;
 }
 
+function projectV2Snapshot(snapshot: SolanaHolderStructure | SolanaPartialHolderStructure): SolanaHolderSnapshotPayloadV2 {
+  const input = snapshot as SolanaHolderStructure | SolanaPartialHolderStructure;
+  const concentrationMetric = (metric: HolderConcentration | PartialHolderConcentrationV2) => metric.status === "available"
+    ? { status: metric.status, topN: metric.topN, numeratorRaw: metric.numeratorRaw, denominatorRaw: metric.denominatorRaw, denominatorBasis: metric.denominatorBasis, percentage: metric.percentage }
+    : { status: metric.status, topN: metric.topN, numeratorRaw: metric.numeratorRaw, denominatorRaw: metric.denominatorRaw, denominatorBasis: metric.denominatorBasis, percentage: metric.percentage, reason: metric.reason };
+  return structuredClone({
+    chain: input.chain,
+    mintAddress: input.mintAddress,
+    tokenProgram: input.tokenProgram,
+    decimals: input.decimals,
+    currentMintSupplyRaw: input.currentMintSupplyRaw,
+    observedPositiveBalanceRaw: input.observedPositiveBalanceRaw,
+    supplyDifferenceRaw: input.supplyDifferenceRaw,
+    fetchedAt: input.fetchedAt,
+    enumeration: {
+      completeness: input.enumeration.completeness,
+      slotConsistency: input.enumeration.slotConsistency,
+      pageCount: input.enumeration.pageCount,
+      contextSlots: [...input.enumeration.contextSlots],
+    },
+    tokenAccountCount: input.tokenAccountCount,
+    nonzeroTokenAccountCount: input.nonzeroTokenAccountCount,
+    tokenAccountStateSummary: {
+      initialized: {
+        tokenAccountCount: input.tokenAccountStateSummary.initialized.tokenAccountCount,
+        positiveBalanceTokenAccountCount: input.tokenAccountStateSummary.initialized.positiveBalanceTokenAccountCount,
+        observedBalanceRaw: input.tokenAccountStateSummary.initialized.observedBalanceRaw,
+      },
+      frozen: {
+        tokenAccountCount: input.tokenAccountStateSummary.frozen.tokenAccountCount,
+        positiveBalanceTokenAccountCount: input.tokenAccountStateSummary.frozen.positiveBalanceTokenAccountCount,
+        observedBalanceRaw: input.tokenAccountStateSummary.frozen.observedBalanceRaw,
+      },
+    },
+    rawOwnerCount: input.rawOwnerCount,
+    rawOwnerAuthorities: input.rawOwnerAuthorities.map((owner) => ({
+      ownerAddress: owner.ownerAddress,
+      balanceRaw: owner.balanceRaw,
+      tokenAccountCount: owner.tokenAccountCount,
+    })),
+    amountCoverage: {
+      state: input.amountCoverage.state,
+      unsupportedExtensionTypes: [...input.amountCoverage.unsupportedExtensionTypes],
+      reason: input.amountCoverage.reason,
+    },
+    concentration: {
+      top1: concentrationMetric(input.concentration.top1),
+      top5: concentrationMetric(input.concentration.top5),
+      top10: concentrationMetric(input.concentration.top10),
+      top20: concentrationMetric(input.concentration.top20),
+    },
+  }) as SolanaHolderSnapshotPayloadV2;
+}
+
+function validateV2Acquisition(
+  snapshot: SolanaHolderSnapshotPayloadV2,
+  acquisition: SolanaHolderSnapshotAcquisitionV2,
+): void {
+  assert(acquisition && typeof acquisition === "object", "v2 acquisition provenance is missing");
+  assertExactKeys(acquisition, ["completeness", "stopReason", "configuredMaxPages", "requestedPageSize"], "v2 acquisition provenance");
+  assert(acquisition.completeness === "complete" || acquisition.completeness === "partial", "v2 acquisition completeness is invalid");
+  assert(acquisition.configuredMaxPages === 20 && acquisition.requestedPageSize === 5000, "v2 acquisition bounds are invalid");
+  const enumeration = snapshot.enumeration;
+  assert(enumeration.pageCount > 0 && enumeration.pageCount <= acquisition.configuredMaxPages, "v2 accepted page count is invalid");
+  assert(enumeration.contextSlots.length === enumeration.pageCount, "v2 context slots do not reconcile with accepted pages");
+  if (acquisition.completeness === "complete") {
+    assert(enumeration.completeness === "complete" && acquisition.stopReason === "provider_terminated", "complete v2 provenance contradicts enumeration");
+  } else {
+    assert(enumeration.completeness === "partial", "partial v2 provenance contradicts enumeration");
+    assert(V2_PARTIAL_STOP_REASONS.has((acquisition as { stopReason: string }).stopReason), "partial v2 stop reason is invalid");
+    assert(acquisition.stopReason === "page_cap" ? enumeration.pageCount === 20 : enumeration.pageCount < 20,
+      "partial v2 accepted page count contradicts its stop reason");
+  }
+}
+
+export function createSolanaHolderSnapshotRecordV2(
+  snapshot: SolanaHolderStructure,
+  acquisition: SolanaHolderSnapshotAcquisitionV2,
+  source?: SolanaHolderSnapshotSource,
+): SolanaHolderSnapshotRecordV2;
+export function createSolanaHolderSnapshotRecordV2(
+  snapshot: SolanaPartialHolderStructure,
+  acquisition?: never,
+  source?: SolanaHolderSnapshotSource,
+): SolanaHolderSnapshotRecordV2;
+export function createSolanaHolderSnapshotRecordV2(
+  snapshot: SolanaHolderStructure | SolanaPartialHolderStructure,
+  acquisition?: SolanaHolderSnapshotAcquisitionV2,
+  source: SolanaHolderSnapshotSource = DEFAULT_SOURCE,
+): SolanaHolderSnapshotRecordV2 {
+  const embeddedAcquisition = "acquisition" in snapshot ? snapshot.acquisition : undefined;
+  let resolvedAcquisition: SolanaHolderSnapshotAcquisitionV2;
+  if (embeddedAcquisition) resolvedAcquisition = { completeness: "partial", ...embeddedAcquisition };
+  else {
+    assert(acquisition !== undefined, "complete v2 acquisition provenance must be explicit");
+    resolvedAcquisition = acquisition;
+  }
+  assert(!embeddedAcquisition || acquisition === undefined, "partial v2 acquisition must come from its holder input");
+  assertExactKeys(source, ["provider", "method", "commitment"], "source provenance");
+  assert(source.provider === "helius" && source.method === "getProgramAccountsV2" && source.commitment === "finalized", "source provenance is invalid");
+  const projected = projectV2Snapshot(snapshot);
+  validateSnapshot(projected as unknown as SolanaHolderSnapshotPayload, true);
+  validateV2Acquisition(projected, resolvedAcquisition);
+  const frozenSnapshot = cloneAndFreeze(projected);
+  const frozenSource = Object.freeze({ ...source });
+  const frozenAcquisition = Object.freeze({ ...resolvedAcquisition });
+  return Object.freeze({
+    schemaVersion: RECORD_VERSION_V2,
+    snapshotId: calculateSolanaHolderSnapshotIdV2(frozenSnapshot, frozenSource, frozenAcquisition),
+    source: frozenSource,
+    acquisition: frozenAcquisition,
+    snapshot: frozenSnapshot,
+  });
+}
+
 function expectedPercentage(numeratorRaw: string, denominatorRaw: string): string {
   const numerator = BigInt(numeratorRaw);
   const denominator = BigInt(denominatorRaw);
@@ -122,7 +272,7 @@ function expectedPercentage(numeratorRaw: string, denominatorRaw: string): strin
   return `${scaled / scale}.${(scaled % scale).toString().padStart(6, "0")}`;
 }
 
-function validateSnapshot(snapshot: SolanaHolderSnapshotPayload): void {
+function validateSnapshot(snapshot: SolanaHolderSnapshotPayload, allowPartialEnumeration = false): void {
   assert(snapshot && typeof snapshot === "object", "snapshot payload is missing");
   assert(snapshot.chain === "solana", "chain must be solana");
   assert(isSolanaPublicKeySyntax(snapshot.mintAddress), "mint address is malformed");
@@ -194,6 +344,11 @@ function validateSnapshot(snapshot: SolanaHolderSnapshotPayload): void {
     const metric = snapshot.concentration[`top${n}` as "top1" | "top5" | "top10" | "top20"] as HolderConcentration;
     assert(metric && metric.topN === n && metric.denominatorBasis === "current_mint_supply" && metric.denominatorRaw === snapshot.currentMintSupplyRaw, `top${n} denominator or identity is invalid`);
     const zeroSupply = BigInt(snapshot.currentMintSupplyRaw) === 0n;
+    if (allowPartialEnumeration && enumeration.completeness === "partial") {
+      assert(metric.status === "unavailable" && metric.numeratorRaw === null && metric.percentage === null
+        && (metric as unknown as PartialHolderConcentrationV2).reason === "enumeration_incomplete", `top${n} partial enumeration concentration must remain unavailable`);
+      continue;
+    }
     if (metric.status === "available") {
       assert(!supplyInconsistent && !zeroSupply, `top${n} cannot be numerically available with inconsistent or zero supply`);
       if (coverage.state === "partial") {
@@ -226,7 +381,42 @@ export function validateSolanaHolderSnapshotRecord(record: SolanaHolderSnapshotR
   assert(record.snapshotId === calculateSolanaHolderSnapshotId(record.snapshot, record.source), "snapshot ID does not match its content");
 }
 
-function unavailableReason(snapshot: SolanaHolderSnapshotPayload): "enumeration_incomplete" | "amount_coverage_partial" | "supply_inconsistency" | null {
+export function validateSolanaHolderSnapshotRecordV2(record: SolanaHolderSnapshotRecordV2): void {
+  assert(record && record.schemaVersion === RECORD_VERSION_V2, "unsupported v2 record schema");
+  assertExactKeys(record, ["schemaVersion", "snapshotId", "source", "acquisition", "snapshot"], "v2 record");
+  assert(record.source && record.source.provider === "helius" && record.source.method === "getProgramAccountsV2" && record.source.commitment === "finalized", "source provenance is invalid");
+  assertExactKeys(record.source, ["provider", "method", "commitment"], "source provenance");
+  assertExactKeys(record.acquisition, ["completeness", "stopReason", "configuredMaxPages", "requestedPageSize"], "v2 acquisition provenance");
+  assert(record.snapshot && typeof record.snapshot === "object" && !Object.hasOwn(record.snapshot, "acquisition"), "v2 snapshot contains duplicated or unsafe acquisition data");
+  assertExactKeys(record.snapshot, ["chain", "mintAddress", "tokenProgram", "decimals", "currentMintSupplyRaw", "observedPositiveBalanceRaw", "supplyDifferenceRaw", "fetchedAt", "enumeration", "tokenAccountCount", "nonzeroTokenAccountCount", "tokenAccountStateSummary", "rawOwnerCount", "rawOwnerAuthorities", "amountCoverage", "concentration"], "v2 snapshot");
+  assertExactKeys(record.snapshot.enumeration, ["completeness", "slotConsistency", "pageCount", "contextSlots"], "v2 enumeration");
+  assertExactKeys(record.snapshot.tokenAccountStateSummary, ["initialized", "frozen"], "v2 token-account state summary");
+  assertExactKeys(record.snapshot.tokenAccountStateSummary.initialized, ["tokenAccountCount", "positiveBalanceTokenAccountCount", "observedBalanceRaw"], "v2 initialized state");
+  assertExactKeys(record.snapshot.tokenAccountStateSummary.frozen, ["tokenAccountCount", "positiveBalanceTokenAccountCount", "observedBalanceRaw"], "v2 frozen state");
+  assertExactKeys(record.snapshot.amountCoverage, ["state", "unsupportedExtensionTypes", "reason"], "v2 amount coverage");
+  assertExactKeys(record.snapshot.concentration, ["top1", "top5", "top10", "top20"], "v2 concentration");
+  for (const n of TOP_N) {
+    const metric = record.snapshot.concentration[`top${n}` as "top1" | "top5" | "top10" | "top20"];
+    assertExactKeys(metric, metric.status === "available"
+      ? ["status", "topN", "numeratorRaw", "denominatorRaw", "denominatorBasis", "percentage"]
+      : ["status", "topN", "numeratorRaw", "denominatorRaw", "denominatorBasis", "percentage", "reason"], `v2 top${n} concentration`);
+  }
+  for (const owner of record.snapshot.rawOwnerAuthorities) {
+    assertExactKeys(owner, ["ownerAddress", "balanceRaw", "tokenAccountCount"], "v2 owner balance");
+  }
+  validateSnapshot(record.snapshot as unknown as SolanaHolderSnapshotPayload, true);
+  validateV2Acquisition(record.snapshot, record.acquisition);
+  assert(typeof record.snapshotId === "string" && /^sha256:[0-9a-f]{64}$/.test(record.snapshotId), "snapshot ID format is invalid");
+  assert(record.snapshotId === calculateSolanaHolderSnapshotIdV2(record.snapshot, record.source, record.acquisition), "snapshot ID does not match its content");
+}
+
+export function validateSolanaHolderSnapshotRecordVersioned(record: SolanaHolderSnapshotRecordVersioned): void {
+  if (record?.schemaVersion === RECORD_VERSION) validateSolanaHolderSnapshotRecord(record);
+  else if (record?.schemaVersion === RECORD_VERSION_V2) validateSolanaHolderSnapshotRecordV2(record);
+  else assert(false, "unsupported record schema");
+}
+
+function unavailableReason(snapshot: SolanaHolderSnapshotPayload | SolanaHolderSnapshotPayloadV2): "enumeration_incomplete" | "amount_coverage_partial" | "supply_inconsistency" | null {
   if ((snapshot.enumeration as { completeness: string }).completeness !== "complete") return "enumeration_incomplete";
   if (snapshot.amountCoverage.reason === "supply_inconsistency" || BigInt(snapshot.observedPositiveBalanceRaw) > BigInt(snapshot.currentMintSupplyRaw)) return "supply_inconsistency";
   if (snapshot.amountCoverage.state !== "complete") return "amount_coverage_partial";
@@ -235,7 +425,7 @@ function unavailableReason(snapshot: SolanaHolderSnapshotPayload): "enumeration_
 
 /** Pure resolver for already validated holder evidence. Callers validate the record at their public boundary. */
 export function resolveSolanaSnapshotOwnerBalance(
-  snapshot: SolanaHolderSnapshotPayload,
+  snapshot: SolanaHolderSnapshotPayload | SolanaHolderSnapshotPayloadV2,
   owner: string,
 ): SolanaSnapshotOwnerBalance {
   const observed = snapshot.rawOwnerAuthorities.find((candidate) => candidate.ownerAddress === owner);
@@ -247,7 +437,7 @@ export function resolveSolanaSnapshotOwnerBalance(
 }
 
 /** Completeness gate for metrics over a snapshot's positive-owner set. */
-export function getSolanaHolderEvidenceCompleteness(snapshot: SolanaHolderSnapshotPayload): "complete" | "partial" {
+export function getSolanaHolderEvidenceCompleteness(snapshot: SolanaHolderSnapshotPayload | SolanaHolderSnapshotPayloadV2): "complete" | "partial" {
   return unavailableReason(snapshot) === null ? "complete" : "partial";
 }
 
@@ -279,8 +469,8 @@ function formatPercentageMicros(value: bigint): string {
 }
 
 function concentrationDelta(
-  earlier: HolderConcentration,
-  later: HolderConcentration,
+  earlier: HolderConcentration | PartialHolderConcentrationV2,
+  later: HolderConcentration | PartialHolderConcentrationV2,
   completeness: "complete" | "partial",
 ): SolanaConcentrationDelta {
   if (earlier.status === "available" && later.status === "available") {
@@ -357,5 +547,70 @@ export function compareSolanaHolderSnapshots(
     observedPositiveOwnerCountDelta: countDelta,
     authorities,
     concentrationPercentagePointDeltas: { top1: metric("top1"), top5: metric("top5"), top10: metric("top10"), top20: metric("top20") },
+  };
+}
+
+function comparisonCore(first: SolanaHolderSnapshotPayload | SolanaHolderSnapshotPayloadV2, second: SolanaHolderSnapshotPayload | SolanaHolderSnapshotPayloadV2) {
+  assert(first.chain === second.chain, "chain mismatch");
+  assert(first.mintAddress === second.mintAddress, "mint mismatch");
+  assert(first.tokenProgram === second.tokenProgram, "token program mismatch");
+  assert(first.decimals === second.decimals, "decimals mismatch");
+  const earlierTime = Date.parse(first.fetchedAt);
+  const laterTime = Date.parse(second.fetchedAt);
+  assert(earlierTime < laterTime, "caller order must have strictly increasing valid fetchedAt timestamps");
+
+  const addresses = [...new Set([
+    ...first.rawOwnerAuthorities.map((owner) => owner.ownerAddress),
+    ...second.rawOwnerAuthorities.map((owner) => owner.ownerAddress),
+  ])].sort();
+  const evidenceCompleteness = getSolanaHolderEvidenceCompleteness(first) === "complete" &&
+    getSolanaHolderEvidenceCompleteness(second) === "complete" ? "complete" : "partial";
+  const authorities = addresses.map((authorityAddress): SolanaHolderAuthorityComparison => {
+    const earlierSide = resolveSolanaSnapshotOwnerBalance(first, authorityAddress);
+    const laterSide = resolveSolanaSnapshotOwnerBalance(second, authorityAddress);
+    const delta: SolanaSnapshotMetric<string> = isKnown(earlierSide) && isKnown(laterSide)
+      ? { status: "available", value: (BigInt(laterSide.balanceRaw) - BigInt(earlierSide.balanceRaw)).toString(), completeness: evidenceCompleteness }
+      : { status: "unavailable", value: null, reason: earlierSide.status === "unknown" || laterSide.status === "unknown" ? "absence_not_proven" : "input_metric_unavailable" };
+    return { authorityAddress, earlier: earlierSide, later: laterSide, transition: transition(earlierSide, laterSide), balanceDeltaRaw: delta };
+  });
+  const countDelta: SolanaSnapshotMetric<number> = {
+    status: "available", value: second.rawOwnerCount - first.rawOwnerCount, completeness: evidenceCompleteness,
+  };
+  const metric = (key: "top1" | "top5" | "top10" | "top20") => concentrationDelta(first.concentration[key], second.concentration[key], evidenceCompleteness);
+  return {
+    earlierEnumeration: { pageCount: first.enumeration.pageCount, contextSlots: [...first.enumeration.contextSlots], slotConsistency: first.enumeration.slotConsistency as "not_guaranteed" },
+    laterEnumeration: { pageCount: second.enumeration.pageCount, contextSlots: [...second.enumeration.contextSlots], slotConsistency: second.enumeration.slotConsistency as "not_guaranteed" },
+    observedPositiveOwnerCountDelta: countDelta,
+    authorities,
+    concentrationPercentagePointDeltas: { top1: metric("top1"), top5: metric("top5"), top10: metric("top10"), top20: metric("top20") },
+  };
+}
+
+function versionProvenance(record: SolanaHolderSnapshotRecordVersioned) {
+  return record.schemaVersion === RECORD_VERSION_V2
+    ? { schemaVersion: RECORD_VERSION_V2, acquisition: record.acquisition } as const
+    : { schemaVersion: RECORD_VERSION, acquisition: { status: "not_recorded", reason: "legacy_v1_schema" } } as const;
+}
+
+export function compareSolanaHolderSnapshotsV2(
+  earlier: SolanaHolderSnapshotRecordVersioned,
+  later: SolanaHolderSnapshotRecordVersioned,
+): SolanaHolderSnapshotComparisonV2 {
+  validateSolanaHolderSnapshotRecordVersioned(earlier);
+  validateSolanaHolderSnapshotRecordVersioned(later);
+  const core = comparisonCore(earlier.snapshot, later.snapshot);
+  return {
+    schemaVersion: COMPARISON_VERSION_V2,
+    provenance: {
+      earlierSnapshotId: earlier.snapshotId,
+      laterSnapshotId: later.snapshotId,
+      earlierRecord: versionProvenance(earlier),
+      laterRecord: versionProvenance(later),
+      earlierEnumeration: core.earlierEnumeration,
+      laterEnumeration: core.laterEnumeration,
+    },
+    observedPositiveOwnerCountDelta: core.observedPositiveOwnerCountDelta,
+    authorities: core.authorities,
+    concentrationPercentagePointDeltas: core.concentrationPercentagePointDeltas,
   };
 }

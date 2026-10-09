@@ -2,10 +2,12 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const {
   buildSolanaHolderSnapshotSeriesEvidence,
+  buildSolanaHolderSnapshotSeriesEvidenceV2,
 } = require("../dist/normalization/solanaHolderSnapshotSeries.js");
 const {
   calculateSolanaHolderSnapshotId,
   createSolanaHolderSnapshotRecord,
+  createSolanaHolderSnapshotRecordV2,
 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
 const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
@@ -56,6 +58,50 @@ function snapshot(balances, index, options = {}) {
   }
   if (options.mintAddress) holder.mintAddress = options.mintAddress;
   return createSolanaHolderSnapshotRecord(holder);
+}
+
+function snapshotV2(balances, index, options = {}) {
+  const holderOptions = {
+    tokenProgram: options.tokenProgram ?? "spl-token",
+    decimals: options.decimals ?? 6,
+    supply: options.supply ?? "1000",
+  };
+  const accounts = balances.map(([ownerByte, amount], accountIndex) => account(ownerByte, amount, ownerByte + 64 + accountIndex, holderOptions.tokenProgram));
+  const fetchedAt = new Date(SOURCE_TIME + index * 60_000).toISOString();
+  if (options.partial) {
+    const pageCount = options.stopReason === "page_cap" ? 20 : 1;
+    const base58CursorSuffixes = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    const pages = Array.from({ length: pageCount }, (_, pageIndex) => ({
+      accounts: pageIndex === 0 ? accounts : [],
+      paginationKey: `cursor${base58CursorSuffixes[pageIndex]}`,
+      contextSlot: 100 + index * 20 + pageIndex,
+    }));
+    const holder = normalizeSolanaHolderStructure({
+      mintAddress: MINT,
+      tokenProgram: holderOptions.tokenProgram,
+      decimals: holderOptions.decimals,
+      currentMintSupplyRaw: holderOptions.supply,
+      mintExtensionTypes: options.mintExtensionTypes ?? [],
+      acquisition: {
+        status: "available", completeness: "partial", stopReason: options.stopReason ?? "request_timeout",
+        configuredMaxPages: 20, requestedPageSize: 5000, pages,
+      },
+      fetchedAt,
+    });
+    return createSolanaHolderSnapshotRecordV2(holder);
+  }
+  const holder = normalizeSolanaHolderStructure({
+    mintAddress: MINT,
+    tokenProgram: holderOptions.tokenProgram,
+    decimals: holderOptions.decimals,
+    currentMintSupplyRaw: holderOptions.supply,
+    mintExtensionTypes: options.mintExtensionTypes ?? [],
+    pages: [{ accounts, paginationKey: null, contextSlot: 100 + index }],
+    fetchedAt,
+  });
+  return createSolanaHolderSnapshotRecordV2(holder, {
+    completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000,
+  });
 }
 
 function series(...captures) {
@@ -250,5 +296,81 @@ test("authority union is lexicographically ordered and inputs remain unchanged",
   assert.deepEqual(series(first, second), before);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.authorities), true);
+});
+
+function seriesV2(...captures) {
+  return { schemaVersion: "solana-holder-snapshot-series-v2", captures };
+}
+
+test("V2 series handles V1/V2 captures and records legacy provenance as not recorded", () => {
+  const legacy = snapshot([[1, "20"]], 0);
+  const current = snapshotV2([[1, "25"]], 1);
+  const result = buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(legacy, current));
+  assert.equal(result.schemaVersion, "solana-holder-snapshot-series-evidence-v2");
+  assert.deepEqual(result.captures[0].record, {
+    schemaVersion: "solana-holder-snapshot-record-v1", acquisition: { status: "not_recorded", reason: "legacy_v1_schema" },
+  });
+  assert.equal(result.captures[1].record.acquisition.stopReason, "provider_terminated");
+  assert.equal(authority(result, 1).positiveAtEveryCapture, "yes");
+});
+
+test("partial middle V2 capture leaves missing authority unknown between complete endpoints", () => {
+  const first = snapshotV2([[1, "20"]], 0);
+  const middle = snapshotV2([[2, "10"]], 1, { partial: true, stopReason: "provider_error" });
+  const last = snapshotV2([[1, "30"]], 2);
+  const result = buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(first, middle, last));
+  const item = authority(result, 1);
+  assert.deepEqual(item.captures.map((capture) => capture.state.status), ["positive_observed", "unknown", "positive_observed"]);
+  assert.equal(item.positiveAtEveryCapture, "unknown");
+  assert.equal(item.positiveAtBothEndpoints, "yes");
+  assert.equal(result.observedPositiveOwnerCountTrajectory[1].completeness, "partial");
+  assert.equal(result.adjacentObservedPositiveOwnerCountDeltas[0].completeness, "partial");
+  assert.equal(result.captures[1].record.acquisition.stopReason, "provider_error");
+});
+
+test("V2 partial capture preserves positive observations and explicit unknown concentration", () => {
+  const partial = snapshotV2([[1, "250"]], 0, { partial: true });
+  const full = snapshotV2([[1, "300"]], 1);
+  const result = buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(partial, full));
+  assert.deepEqual(authority(result, 1).captures[0].state, { status: "positive_observed", balanceRaw: "250" });
+  assert.deepEqual(result.concentrationTrajectory[0].top1, { status: "unavailable", percentage: null, reason: "enumeration_incomplete" });
+});
+
+test("V2 records preserve every approved partial acquisition stop reason", () => {
+  for (const stopReason of ["page_cap", "request_timeout", "provider_error", "malformed_response"]) {
+    const partial = snapshotV2([[1, "20"]], 0, { partial: true, stopReason });
+    const complete = snapshotV2([[1, "25"]], 1);
+    const result = buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(partial, complete));
+    assert.equal(result.captures[0].record.acquisition.stopReason, stopReason);
+    assert.equal(result.captures[0].pageCount, stopReason === "page_cap" ? 20 : 1);
+  }
+});
+
+test("V2 series preserves accepted page slots and does not expose cursors or mutate records", () => {
+  const partial = snapshotV2([[1, "20"]], 0, { partial: true, stopReason: "page_cap" });
+  const complete = snapshotV2([[1, "25"]], 1);
+  const before = structuredClone([partial, complete]);
+  const result = buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(partial, complete));
+  assert.equal(result.captures[0].pageCount, 20);
+  assert.deepEqual(result.captures[0].contextSlots, Array.from({ length: 20 }, (_, i) => 100 + i));
+  assert.equal(JSON.stringify(result).includes("cursor"), false);
+  assert.deepEqual([partial, complete], before);
+});
+
+test("V2 series rejects malformed versioned captures and incompatible identity", () => {
+  const first = snapshotV2([[1, "20"]], 0);
+  const second = snapshotV2([[1, "25"]], 1, { partial: true });
+  assert.throws(() => buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(first)), /at least two/);
+  assert.throws(() => buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(first, { ...second, snapshotId: `sha256:${"0".repeat(64)}` })), /snapshot ID/);
+  const otherMintHolder = normalizeSolanaHolderStructure({
+    mintAddress: encodeSolanaPublicKey(Buffer.alloc(32, 7)), tokenProgram: "spl-token", decimals: 6,
+    currentMintSupplyRaw: "1000", mintExtensionTypes: [],
+    pages: [{ accounts: [], paginationKey: null, contextSlot: 101 }],
+    fetchedAt: new Date(SOURCE_TIME + 60_000).toISOString(),
+  });
+  const otherMint = createSolanaHolderSnapshotRecordV2(otherMintHolder, {
+    completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000,
+  });
+  assert.throws(() => buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(first, otherMint)), /mint mismatch/);
 });
 

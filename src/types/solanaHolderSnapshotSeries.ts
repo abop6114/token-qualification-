@@ -1,6 +1,9 @@
 import type { HolderConcentration } from "./holders";
 import type {
   SolanaHolderSnapshotRecord,
+  SolanaHolderSnapshotRecordVersioned,
+  SolanaHolderSnapshotVersionProvenance,
+  PartialHolderConcentrationV2,
   SolanaSnapshotMetric,
   SolanaSnapshotOwnerBalance,
 } from "./solanaHolderSnapshot";
@@ -37,7 +40,7 @@ export type SolanaHolderSeriesConcentrationMetric =
   | {
       readonly status: "unavailable";
       readonly percentage: null;
-      readonly reason: Extract<HolderConcentration, { status: "unavailable" }>["reason"];
+      readonly reason: Extract<HolderConcentration, { status: "unavailable" }>["reason"] | PartialHolderConcentrationV2["reason"];
     };
 
 export interface SolanaHolderSnapshotSeriesEvidence {
@@ -54,4 +57,28 @@ export interface SolanaHolderSnapshotSeriesEvidence {
     readonly top10: SolanaHolderSeriesConcentrationMetric;
     readonly top20: SolanaHolderSeriesConcentrationMetric;
   }[];
+}
+
+export interface SolanaHolderSnapshotSeriesV2 {
+  readonly schemaVersion: "solana-holder-snapshot-series-v2";
+  readonly captures: readonly SolanaHolderSnapshotRecordVersioned[];
+}
+
+export interface SolanaHolderSnapshotSeriesCaptureReferenceV2 {
+  readonly snapshotId: string;
+  readonly fetchedAt: string;
+  readonly pageCount: number;
+  readonly contextSlots: readonly number[];
+  readonly record: SolanaHolderSnapshotVersionProvenance;
+}
+
+export interface SolanaHolderSnapshotSeriesEvidenceV2 {
+  readonly schemaVersion: "solana-holder-snapshot-series-evidence-v2";
+  readonly captures: readonly SolanaHolderSnapshotSeriesCaptureReferenceV2[];
+  /** Elapsed time between first and last capture timestamps; not a continuous observation duration. */
+  readonly elapsedCaptureSpanMilliseconds: number;
+  readonly authorities: readonly SolanaHolderAuthoritySeriesEvidence[];
+  readonly observedPositiveOwnerCountTrajectory: readonly SolanaSnapshotMetric<number>[];
+  readonly adjacentObservedPositiveOwnerCountDeltas: readonly SolanaSnapshotMetric<number>[];
+  readonly concentrationTrajectory: SolanaHolderSnapshotSeriesEvidence["concentrationTrajectory"];
 }

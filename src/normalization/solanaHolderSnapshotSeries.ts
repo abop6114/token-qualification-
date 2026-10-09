@@ -1,16 +1,20 @@
-import type { HolderConcentration } from "../types/holders";
+import type { HolderConcentration, SolanaPartialHolderStructure } from "../types/holders";
 import type {
   SolanaHolderAuthoritySeriesEvidence,
   SolanaHolderSeriesConcentrationMetric,
   SolanaHolderSnapshotSeries,
   SolanaHolderSnapshotSeriesEvidence,
   SolanaHolderSnapshotSeriesCaptureReference,
+  SolanaHolderSnapshotSeriesV2,
+  SolanaHolderSnapshotSeriesEvidenceV2,
+  SolanaHolderSnapshotSeriesCaptureReferenceV2,
 } from "../types/solanaHolderSnapshotSeries";
-import type { SolanaSnapshotMetric, SolanaSnapshotOwnerBalance } from "../types/solanaHolderSnapshot";
+import type { SolanaSnapshotMetric, SolanaSnapshotOwnerBalance, SolanaHolderSnapshotPayloadV2, SolanaHolderSnapshotRecordVersioned } from "../types/solanaHolderSnapshot";
 import {
   getSolanaHolderEvidenceCompleteness,
   resolveSolanaSnapshotOwnerBalance,
   validateSolanaHolderSnapshotRecord,
+  validateSolanaHolderSnapshotRecordVersioned,
 } from "./solanaHolderSnapshotComparison";
 
 const SERIES_VERSION = "solana-holder-snapshot-series-v1" as const;
@@ -44,13 +48,94 @@ function triStateEndpoints(states: readonly SolanaSnapshotOwnerBalance[]): "yes"
 }
 
 function concentrationMetric(
-  metric: HolderConcentration,
+  metric: HolderConcentration | SolanaHolderSnapshotPayloadV2["concentration"]["top1"],
   completeness: "complete" | "partial",
 ): SolanaHolderSeriesConcentrationMetric {
   if (metric.status === "unavailable") {
     return { status: "unavailable", percentage: null, reason: metric.reason };
   }
   return { status: "available", percentage: metric.percentage, completeness };
+}
+
+function versionReference(record: SolanaHolderSnapshotRecordVersioned): SolanaHolderSnapshotSeriesCaptureReferenceV2["record"] {
+  return record.schemaVersion === "solana-holder-snapshot-record-v2"
+    ? { schemaVersion: record.schemaVersion, acquisition: record.acquisition }
+    : { schemaVersion: record.schemaVersion, acquisition: { status: "not_recorded", reason: "legacy_v1_schema" } };
+}
+
+function validateSeriesV2(series: SolanaHolderSnapshotSeriesV2): number[] {
+  assert(series && series.schemaVersion === "solana-holder-snapshot-series-v2", "unsupported v2 series schema");
+  assert(Array.isArray(series.captures) && series.captures.length >= 2, "at least two captures are required");
+  for (const capture of series.captures) validateSolanaHolderSnapshotRecordVersioned(capture);
+  const ids = new Set<string>();
+  const first = series.captures[0].snapshot;
+  let previousTimestamp = Number.NEGATIVE_INFINITY;
+  return series.captures.map((capture) => {
+    assert(!ids.has(capture.snapshotId), "duplicate snapshot ID");
+    ids.add(capture.snapshotId);
+    const snapshot = capture.snapshot;
+    assert(snapshot.chain === first.chain, "chain mismatch");
+    assert(snapshot.mintAddress === first.mintAddress, "mint mismatch");
+    assert(snapshot.tokenProgram === first.tokenProgram, "token program mismatch");
+    assert(snapshot.decimals === first.decimals, "decimals mismatch");
+    const timestamp = Date.parse(snapshot.fetchedAt);
+    assert(Number.isSafeInteger(timestamp) && timestamp > previousTimestamp, "captures must remain in strictly increasing caller-provided timestamp order");
+    previousTimestamp = timestamp;
+    return timestamp;
+  });
+}
+
+function versionedReferences(series: SolanaHolderSnapshotSeriesV2): SolanaHolderSnapshotSeriesCaptureReferenceV2[] {
+  return series.captures.map((record) => ({
+    snapshotId: record.snapshotId,
+    fetchedAt: record.snapshot.fetchedAt,
+    pageCount: record.snapshot.enumeration.pageCount,
+    contextSlots: [...record.snapshot.enumeration.contextSlots],
+    record: versionReference(record),
+  }));
+}
+
+export function buildSolanaHolderSnapshotSeriesEvidenceV2(
+  series: SolanaHolderSnapshotSeriesV2,
+): SolanaHolderSnapshotSeriesEvidenceV2 {
+  const timestamps = validateSeriesV2(series);
+  const elapsedBigInt = BigInt(timestamps[timestamps.length - 1]) - BigInt(timestamps[0]);
+  assert(elapsedBigInt > 0n && elapsedBigInt <= MAX_SAFE_BIGINT, "elapsed capture span exceeds safe millisecond precision");
+  const snapshots = series.captures.map((record) => record.snapshot);
+  const completeness = snapshots.map(getSolanaHolderEvidenceCompleteness);
+  const authorities = [...new Set(snapshots.flatMap((snapshot) => snapshot.rawOwnerAuthorities.map((owner) => owner.ownerAddress)))].sort().map((authorityAddress) => {
+    const states = snapshots.map((snapshot) => resolveSolanaSnapshotOwnerBalance(snapshot, authorityAddress));
+    return {
+      authorityAddress,
+      captures: states.map((state, index) => ({ snapshotId: series.captures[index].snapshotId, state })),
+      positiveObservedCaptureCount: states.filter((state) => state.status === "positive_observed").length,
+      provenNotPositiveCaptureCount: states.filter((state) => state.status === "not_positive").length,
+      unknownCaptureCount: states.filter((state) => state.status === "unknown").length,
+      positiveAtEveryCapture: triStateEvery(states),
+      positiveAtBothEndpoints: triStateEndpoints(states),
+    };
+  });
+  const observedPositiveOwnerCountTrajectory = snapshots.map((snapshot, index) => ownerCountMetric(snapshot.rawOwnerCount, completeness[index]));
+  const adjacentObservedPositiveOwnerCountDeltas = snapshots.slice(1).map((snapshot, index) => {
+    const delta = snapshot.rawOwnerCount - snapshots[index].rawOwnerCount;
+    assert(Number.isSafeInteger(delta), "observed owner-count delta exceeds safe integer precision");
+    return ownerCountMetric(delta, completeness[index] === "complete" && completeness[index + 1] === "complete" ? "complete" : "partial");
+  });
+  const concentrationTrajectory = snapshots.map((snapshot, index) => ({
+    top1: concentrationMetric(snapshot.concentration.top1, completeness[index]),
+    top5: concentrationMetric(snapshot.concentration.top5, completeness[index]),
+    top10: concentrationMetric(snapshot.concentration.top10, completeness[index]),
+    top20: concentrationMetric(snapshot.concentration.top20, completeness[index]),
+  }));
+  return deepFreeze({
+    schemaVersion: "solana-holder-snapshot-series-evidence-v2" as const,
+    captures: versionedReferences(series),
+    elapsedCaptureSpanMilliseconds: Number(elapsedBigInt),
+    authorities,
+    observedPositiveOwnerCountTrajectory,
+    adjacentObservedPositiveOwnerCountDeltas,
+    concentrationTrajectory,
+  });
 }
 
 function ownerCountMetric(value: number, completeness: "complete" | "partial"): SolanaSnapshotMetric<number> {

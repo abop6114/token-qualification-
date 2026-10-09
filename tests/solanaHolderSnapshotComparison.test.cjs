@@ -2,8 +2,12 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const {
   calculateSolanaHolderSnapshotId,
+  calculateSolanaHolderSnapshotIdV2,
   compareSolanaHolderSnapshots,
+  compareSolanaHolderSnapshotsV2,
   createSolanaHolderSnapshotRecord,
+  createSolanaHolderSnapshotRecordV2,
+  validateSolanaHolderSnapshotRecordV2,
 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
 const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
@@ -46,6 +50,22 @@ function owner(result, addressByte) {
   const address = encodeSolanaPublicKey(Buffer.alloc(32, addressByte));
   return result.authorities.find((entry) => entry.authorityAddress === address);
 }
+function partialStructure(balances, options = {}) {
+  const accounts = balances.map(([ownerByte, amount], index) => account(ownerByte, amount, ownerByte + 64 + index));
+  return normalizeSolanaHolderStructure({
+    mintAddress: MINT,
+    tokenProgram: options.tokenProgram ?? "spl-token",
+    decimals: options.decimals ?? 6,
+    currentMintSupplyRaw: options.supply ?? SUPPLY,
+    mintExtensionTypes: options.mintExtensionTypes ?? [],
+    acquisition: {
+      status: "available", completeness: "partial", stopReason: options.stopReason ?? "request_timeout",
+      configuredMaxPages: 20, requestedPageSize: 5000,
+      pages: [{ accounts, paginationKey: "cursor123", contextSlot: options.slot ?? 100 }],
+    },
+    fetchedAt: options.fetchedAt ?? "2026-01-01T00:00:00.000Z",
+  });
+}
 
 test("snapshot IDs are deterministic, content-sensitive, and exclude snapshotId itself", () => {
   const first = structure([[1, "20"]]);
@@ -59,6 +79,102 @@ test("snapshot IDs are deterministic, content-sensitive, and exclude snapshotId 
   const suppliedIdVariant = { ...created, snapshotId: "sha256:" + "0".repeat(64) };
   assert.equal(calculateSolanaHolderSnapshotId(suppliedIdVariant.snapshot), id);
   assert.throws(() => compareSolanaHolderSnapshots(suppliedIdVariant, created), /snapshot ID/);
+});
+
+test("V1 snapshot ID golden value remains unchanged", () => {
+  assert.equal(record([[1, "20"]]).snapshotId, "sha256:80d29e19cf857e7cf9e6abda7180b23216bb27805701f63f6bcc909cd26a8267");
+});
+
+test("V2 complete snapshots retain explicit acquisition provenance and match V1 observations", () => {
+  const holder = structure([[1, "20"]]);
+  const v1 = createSolanaHolderSnapshotRecord(holder);
+  const v2 = createSolanaHolderSnapshotRecordV2(holder, {
+    completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000,
+  });
+  assert.equal(v2.schemaVersion, "solana-holder-snapshot-record-v2");
+  assert.deepEqual(v2.acquisition, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+  assert.deepEqual(v2.snapshot.rawOwnerAuthorities, v1.snapshot.rawOwnerAuthorities);
+  assert.deepEqual(v2.snapshot.enumeration, v1.snapshot.enumeration);
+  assert.notEqual(v2.snapshotId, v1.snapshotId);
+  assert.equal(v2.snapshotId, calculateSolanaHolderSnapshotIdV2(v2.snapshot, v2.source, v2.acquisition));
+  assert.equal(Object.isFrozen(v2.snapshot), true);
+});
+
+test("V2 partial snapshots preserve accepted observations and provenance without cursors", () => {
+  const holder = partialStructure([[1, "20"]]);
+  const v2 = createSolanaHolderSnapshotRecordV2(holder);
+  assert.deepEqual(v2.acquisition, { completeness: "partial", stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000 });
+  assert.equal(v2.snapshot.enumeration.completeness, "partial");
+  assert.equal(v2.snapshot.rawOwnerAuthorities[0].balanceRaw, "20");
+  assert.equal(Object.hasOwn(v2.snapshot, "acquisition"), false);
+  assert.equal(JSON.stringify(v2).includes("cursor123"), false);
+  assert.equal(JSON.stringify(v2).includes("paginationKey"), false);
+  holder.rawOwnerAuthorities[0].balanceRaw = "99";
+  holder.paginationKey = "must-not-be-retained";
+  assert.equal(v2.snapshot.rawOwnerAuthorities[0].balanceRaw, "20");
+  assert.equal(JSON.stringify(v2).includes("must-not-be-retained"), false);
+});
+
+test("V2 identity changes when valid acquisition provenance changes and is deterministic", () => {
+  const first = createSolanaHolderSnapshotRecordV2(partialStructure([[1, "20"]], { stopReason: "request_timeout" }));
+  const same = createSolanaHolderSnapshotRecordV2(partialStructure([[1, "20"]], { stopReason: "request_timeout" }));
+  const changed = createSolanaHolderSnapshotRecordV2(partialStructure([[1, "20"]], { stopReason: "provider_error" }));
+  assert.equal(first.snapshotId, same.snapshotId);
+  assert.notEqual(first.snapshotId, changed.snapshotId);
+});
+
+test("V2 creation rejects contradictory completeness, bounds, pages, and provenance", () => {
+  const complete = structure([[1, "20"]]);
+  const partial = partialStructure([[1, "20"]]);
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(complete, { completeness: "partial", stopReason: "page_cap", configuredMaxPages: 20, requestedPageSize: 5000 }));
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(partial, { completeness: "partial", stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000 }));
+  const partialWithFalseTermination = structuredClone(partial);
+  partialWithFalseTermination.acquisition.stopReason = "provider_terminated";
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(partialWithFalseTermination), /stop reason|contradicts/);
+  const zeroPages = structuredClone(partial);
+  zeroPages.enumeration.pageCount = 0;
+  zeroPages.enumeration.contextSlots = [];
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(zeroPages));
+  const badSlots = structuredClone(partial);
+  badSlots.enumeration.contextSlots = [];
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(badSlots));
+  const badCaps = structuredClone(complete);
+  badCaps.enumeration.pageCount = 21;
+  badCaps.enumeration.contextSlots = Array(21).fill(1);
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(badCaps, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 }));
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(complete, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 19, requestedPageSize: 5000 }));
+  assert.throws(() => createSolanaHolderSnapshotRecordV2(complete, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 1 }));
+});
+
+test("V2 partial comparison preserves unknown absence while exact observed balances remain available", () => {
+  const early = createSolanaHolderSnapshotRecordV2(partialStructure([[1, "20"]]));
+  const later = createSolanaHolderSnapshotRecordV2(structure([[2, "30"]], { fetchedAt: "2026-01-02T00:00:00Z" }), {
+    completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000,
+  });
+  const result = compareSolanaHolderSnapshotsV2(early, later);
+  assert.equal(result.schemaVersion, "solana-holder-snapshot-comparison-v2");
+  assert.equal(owner(result, 1).earlier.status, "positive_observed");
+  assert.equal(owner(result, 1).later.status, "not_positive");
+  assert.equal(owner(result, 2).earlier.status, "unknown");
+  assert.equal(owner(result, 2).earlier.reason, "enumeration_incomplete");
+  assert.equal(owner(result, 2).balanceDeltaRaw.status, "unavailable");
+  assert.deepEqual(result.observedPositiveOwnerCountDelta, { status: "available", value: 0, completeness: "partial" });
+  assert.equal(result.provenance.earlierRecord.acquisition.stopReason, "request_timeout");
+});
+
+test("V2 comparison explicitly labels V1 provenance as not recorded and supports all version pairings", () => {
+  const v1early = record([[1, "20"]]);
+  const v1later = record([[1, "25"]], { fetchedAt: "2026-01-02T00:00:00Z" });
+  const completeProvenance = { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 };
+  const v2early = createSolanaHolderSnapshotRecordV2(structure([[1, "20"]]), completeProvenance);
+  const v2laterComplete = createSolanaHolderSnapshotRecordV2(structure([[1, "25"]], { fetchedAt: "2026-01-02T00:00:00Z" }), completeProvenance);
+  const v2laterPartial = createSolanaHolderSnapshotRecordV2(partialStructure([[1, "25"]], { fetchedAt: "2026-01-02T00:00:00Z" }));
+  for (const [first, second] of [[v1early, v2laterComplete], [v1early, v2laterPartial], [v2early, v1later], [v2early, v2laterPartial]]) {
+    assert.equal(compareSolanaHolderSnapshotsV2(first, second).schemaVersion, "solana-holder-snapshot-comparison-v2");
+  }
+  assert.deepEqual(compareSolanaHolderSnapshotsV2(v1early, v2laterComplete).provenance.earlierRecord, {
+    schemaVersion: "solana-holder-snapshot-record-v1", acquisition: { status: "not_recorded", reason: "legacy_v1_schema" },
+  });
 });
 
 test("snapshot records clone and deeply freeze their normalized evidence", () => {
