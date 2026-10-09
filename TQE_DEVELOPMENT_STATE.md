@@ -7,9 +7,9 @@
 ## 2. Current checkpoint
 
 - Branch: `main`
-- **Implementation checkpoint: `7b10660` — `feat: add Token-2022 mint extension inventory`.** `HEAD` and `origin/main` are synchronized at this checkpoint.
-- The repository was clean before this documentation refresh. The implementation checkpoint is `7b10660`; this documentation change is separate and does not alter that checkpoint.
-- Full-suite result reported at the implementation checkpoint: **537 tests passed, 0 failed**; `npm run build` and `git diff --check` passed. These results are recorded from that checkpoint and were not rerun during this documentation task.
+- **Implementation checkpoint: `ef9bef2` — `feat: add bounded Solana transaction enrichment`.** `HEAD` and `origin/main` are synchronized at this checkpoint.
+- The repository was clean before this documentation refresh. The implementation checkpoint is `ef9bef2`; this documentation change is separate and does not alter that checkpoint.
+- Full-suite result reported at the implementation checkpoint: **555 tests passed, 0 failed**; `npm run build` and `git diff --check` passed. These are checkpoint-reported results and were not rerun during this documentation task.
 - The project began as a Solana-first CLI/JSON prototype. Committed Base/Ethereum work is an evidence-feasibility extension; it is not EVM CLI/product integration.
 
 ## 3. Product objective
@@ -52,7 +52,7 @@ The committed Solana path includes:
 - Helius token-account enumeration, account decoding, owner-authority aggregation, holder structure, supply-based top-1/5/10/20 concentration, and token-account state summary.
 - Exact owner-authority balance distribution: min/max, nearest-rank quantiles, repeated exact-balance evidence, and cumulative ascending-balance profiles.
 - Bounded historical authority selection, query planning, sequential execution, evidence assembly, provenance/completeness, descriptive time and amount profiles, and separate execution telemetry.
-- One-transaction structural evidence normalization for `getTransaction`; this does not classify swaps, buys/sells, funding, or economic behavior.
+- Bounded Phase 2A structural transaction enrichment over signatures already present in validated historical evidence; this does not classify swaps, buys/sells, funding, or economic behavior.
 - Immutable holder snapshots, two-snapshot comparison, and multi-snapshot observed persistence evidence. Absence-to-zero is gated by complete evidence; captures do not imply continuous ownership.
 - Development-only Helius transfer-history and single-transaction feasibility probes remain separate from ordinary CLI behavior.
 
@@ -93,6 +93,34 @@ Historical selection remains over **raw observed positive owner authorities**; i
 `observedCandidateFrameRank` is exact only within the observed candidate frame. It is not necessarily a global holder rank. With a partial source frame, rank zero must not be described as the token's largest holder.
 
 Keep these three completeness dimensions separate: (1) source candidate-frame completeness, (2) selection completeness relative to the observed frame, and (3) selected-authority historical query completion. Successful completion of every selected query does not upgrade a partial source frame to complete.
+
+### Phase 2A — bounded Solana historical transaction enrichment
+
+**Implementation checkpoint `ef9bef2` — `feat: add bounded Solana transaction enrichment`.** Phase 2A adds bounded deterministic structural transaction enrichment for signatures already present in validated Solana historical evidence. It remains internal evidence infrastructure; it is not integrated into the normal CLI or public report.
+
+The pipeline is:
+
+`validated historical plan + execution evidence → deterministic historical-source fingerprint → unique-signature candidate selection → bounded selection → sequential getTransaction acquisition → normalized structural transaction evidence`.
+
+The source fingerprint uses SHA-256 with the `sha256:` prefix and domain/version `solana-historical-transaction-source-fingerprint-v1`. It uses an explicit positional semantic projection, following the existing holder-snapshot hashing precedent, with separate V1 and V2 branches. Where applicable it preserves plan/source version, chain/mint/window, selector and selection semantics, V1 `sourceRank`, V2 `observedCandidateFrameRank` and source-holder snapshot/candidate-frame provenance, authority ordering and dispositions, query/page/terminal evidence, accepted observation ordering and normalized evidence, stable provider/method provenance and `fetchedAt`, and stable provider-error categories. It excludes credentials, authenticated URLs, raw provider responses, opaque cursors, arbitrary provider error text, and elapsed/volatile telemetry. The fingerprint identifies the supplied validated source artifact; it does not prove globally complete history.
+
+Source transaction signatures are validated as Solana transaction signatures. A malformed source signature is rejected rather than silently dropped. Unique signatures are deduplicated before applying the operational cap of **5 unique signatures** per enrichment execution, then ordered lexicographically by Base58 signature. The first five are selected; remaining candidates receive an explicit `not_selected` / `signature_cap` disposition. Every source occurrence remains linked to its unique signature, including duplicate observations, and each selected unique signature is requested at most once. Five is a request-fanout guardrail—not a statistical sample-size claim, representativeness claim, or qualification threshold. Selection completeness is relative only to valid signatures in the supplied source artifact.
+
+Compact source references retain the source fingerprint, authority address and selection position, historical observation index, and version-correct rank. Runtime validation checks that each reference resolves against the same validated plan and evidence. Returned transaction slot must agree with every linked observation; block time must agree when both transaction and source values are usable. Contradictions do not become successful normalized transaction evidence.
+
+The Helius `getTransaction` request uses `encoding: "json"`, `commitment: "finalized"`, and `maxSupportedTransactionVersion: 0`. Finalized is explicit acquisition semantics; version 0 matches the deterministic normalizer's supported versions. Phase 2A does not normalize transaction version 1. Helius's exact provider-specific error behavior for unsupported newer versions remains unknown; arbitrary error-text matching does not invent an unsupported-version classification. The adapter exposes a stable `request_timeout` category when its timeout aborts the request.
+
+Execution is sequential, has a **30-second per-request timeout**, makes **zero retries**, and has no separate total deadline in V1. At most five new `getTransaction` requests are made per execution; cap-excluded signatures make no request. This bounds fanout but does not establish monthly provider cost or provider-credit usage. A provider `result: null` is retained as `provider_result_null`: no transaction was returned at the requested finalized commitment. It does not prove that the transaction never existed.
+
+Acquisition outcome remains separate from transaction-content normalization. Acquisition distinguishes returned, provider-result-null, timeout, provider error, and malformed response. A returned transaction may normalize as available structural evidence, structurally partial evidence, unsupported transaction version, malformed structure, or source-link mismatch. A structurally partial transaction is still a successful acquisition with partial structural content. Execution completeness describes outcomes for the selected signatures only; it does not upgrade source/history completeness.
+
+The existing `SolanaTransactionEvidence` normalizer is reused; no competing transaction normalizer is introduced. Structural facts include signatures, slot/block time, supported version, execution/meta state, static and loaded account addresses, canonical account-index resolution, signer/writable facts, outer and inner compiled instructions, resolved/unresolved instruction references, raw Base58 instruction data, token pre/post balance observations, SOL pre/post observations, and structural completeness. Instructions and account structures remain internal. Raw Base58 instruction data may be retained internally; logs remain omitted. No protocol-purpose decoding or public raw transaction/account/instruction output was added.
+
+Phase 2A does not pair pre/post token rows, calculate token or SOL deltas, treat missing rows as zero, infer transfer direction, or classify swaps, trades, buys, sells, traders, funding, wallet quality, clusters, team/dev identity, or organic/artificial behavior. Deterministic balance-flow evidence is a candidate for **Phase 2B focused reconnaissance first**; its methodology has not been approved. Trading interpretation and protocol-aware trade decoding remain separate later work.
+
+Caching remains deferred. A future cache boundary may use cluster + signature + acquisition-contract version + normalizer version + commitment. Successfully normalized finalized transaction evidence is a strong future cache candidate. Null, error, timeout, malformed, or unsupported outcomes must not be treated as permanent transaction absence.
+
+Phase 2A is predominantly **C — Solana-specific** evidence: transaction structure, account-index mechanics, lookup-loaded addresses, inner instructions, and token-balance arrays. Later U/N questions may consume derived evidence for participation, economic flows, trading behavior, or common funding relationships. No global/EVM-shaped transaction abstraction was introduced. Solana-first implementation does not make Solana transaction mechanics the global architecture.
 
 **Step 5A — deterministic address-role evidence** (`0f113e6 feat: add deterministic Solana address role evidence`): the `SolanaAddressRoleEvidence` sidecar records exact address correlations for `base_mint_authority_address`, `base_freeze_authority_address`, and `dexscreener_reported_pool_address`. It adds no provider calls, exclusions, or adjusted concentration, and does not mutate raw holder evidence. Successful mint resolution carries the requested canonical mint address so role evidence cannot combine a different mint resolution with holder or market evidence.
 
@@ -171,10 +199,15 @@ These are non-blocking design observations, not requests for immediate refactori
 - `NormalizedMarketSnapshot` is shaped for Solana, Base, and Ethereum, but its `mintAddress` terminology is Solana-specific when consumed for EVM contracts. Do not refactor it now without a concrete contract need.
 - Solana holder enumeration's current `complete` type/state must not become a global assertion about holder completeness across chains or providers.
 - Normalize a metric across chains only when its population, denominator, observation point, provenance, and coverage have genuinely comparable meanings.
+- A Phase 2A source fingerprint identifies only the supplied validated historical artifact; it must never imply globally complete history.
+- The five-signature selection cap is an operational cost/fanout guardrail; selected transactions must not be presented as representative history.
+- Structural token-balance observations must not silently become balance-flow or trade interpretation.
+- Provider acquisition and transaction-content normalization outcomes must remain distinct, and partial structural content must not be called a provider failure.
+- V1 `sourceRank` and V2 `observedCandidateFrameRank` semantics must remain distinct in fingerprints and source references.
 
 ## 11. Validation and testing posture
 
-Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At implementation checkpoint `7b10660`, the reported full suite is **537 passing tests**; `npm test` also runs the TypeScript build. These checkpoint results were not rerun during this documentation task.
+Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At Phase 2A implementation checkpoint `ef9bef2`, the reported full suite is **555 passing tests**; `npm run build` and `git diff --check` passed. These checkpoint-reported results were not rerun during this documentation task; `npm test` also runs the TypeScript build.
 
 ## 12. Cost and operating constraints
 
@@ -182,7 +215,7 @@ Preserve Project Context V1 constraints: the normal development/early-beta opera
 
 Prefer progressive analysis, bounded queries and sampling, metric-specific caching/reuse, and per-provider usage/cost telemetry. Avoid unbounded per-wallet/signature fanout and unnecessary AI calls for objective facts. Public/beta precedes payment; actual cost and usage should inform later controls.
 
-Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Phase 1A/1B added no provider or data source, did not increase historical selection or per-authority page/record caps, and does not query additional historical authorities merely because holder enumeration is partial. Partial evidence changes provenance and interpretation, not historical query fanout. Solana token-account acquisition can still be relatively expensive, but is now explicitly bounded by the 20-page guardrail; the bound does not establish provider-wide or blockchain-wide completeness by itself.
+Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Phase 2A adds at most **5 unique-signature `getTransaction` requests** per enrichment execution, sequentially, with zero retries; this bounds request fanout but does not itself prove the below-$200/month target or establish provider-credit pricing. Phase 1A/1B added no provider or data source, did not increase historical selection or per-authority page/record caps, and does not query additional historical authorities merely because holder enumeration is partial. Partial evidence changes provenance and interpretation, not historical query fanout. Solana token-account acquisition can still be relatively expensive, but is now explicitly bounded by the 20-page guardrail; the bound does not establish provider-wide or blockchain-wide completeness by itself.
 
 ## 13. Public presentation boundary
 
@@ -216,7 +249,9 @@ Cash Cat, Super Cat, and SANTA remain reference/validation cases only; they are 
 
 **Step 5B-3 — not-excluded concentration evidence: IMPLEMENTED at `20ee0e5`.** It consumes Step 5B-2 evidence and reports separate current-mint-supply and observed-not-excluded-population Top-N views under the availability and completeness semantics recorded above. It makes no provider calls, does not mutate raw concentration, and does not change the exclusion policy.
 
-Bounded partial-evidence propagation is complete through the currently implemented Solana holder and historical evidence path. The next high-leverage candidate is **bounded transaction enrichment over already-selected historical signatures**, to establish transaction-grounded structural evidence for later participation, relationship, and trading analysis. This is a roadmap candidate, not approved implementation work. A focused design/reconnaissance phase must first examine provider semantics and bounded fanout/cost decisions. The initial enrichment must not classify swaps, buys, sells, traders, organic/artificial behavior, or wallet quality. Future work remains subject to evidence review, bounded implementation, and explicit methodology approval where required.
+**Phase 2A — bounded Solana historical transaction enrichment: IMPLEMENTED at `ef9bef2`.** It fingerprints validated historical source evidence, selects up to five unique signatures deterministically, and sequentially acquires/normalizes internal structural transaction evidence under the request and completeness boundaries recorded above. It adds no trade, flow, holder-quality, or scoring conclusion.
+
+The next candidate is **Phase 2B focused reconnaissance for deterministic token balance-flow evidence**. Do not begin with coding. First settle the exact pre/post token-balance row pairing identity and uniqueness requirements; account-index and mint relationships; owner/program fields; unmatched rows and account creation/closure semantics; exact `BigInt` raw delta and decimal consistency rules; source-completeness requirements; Token-2022 implications; failed-transaction handling; and the boundary between balance deltas and economic interpretation. This reconnaissance does not pre-approve a methodology or implementation. Trading interpretation and protocol-aware trade decoding remain later separate work. No global transaction abstraction, EVM transaction normalization, CLI integration, or public raw transaction presentation is implied.
 
 ## 16. Development workflow
 
