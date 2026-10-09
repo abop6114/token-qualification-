@@ -4,6 +4,8 @@ import type {
   SolanaNotExcludedTopN,
   SolanaNotExcludedTopNKey,
 } from "../types/solanaNotExcludedOwnerAuthorityConcentration";
+import type { SolanaNotExcludedOwnerAuthorityConcentrationEvidenceV2 } from "../types/solanaNotExcludedOwnerAuthorityConcentration";
+import type { SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2 } from "../types/solanaNotExcludedOwnerAuthorityPopulation";
 import { decodeSolanaPublicKey, encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 
 const INPUT_VERSION = "solana-not-excluded-owner-authority-population-v1" as const;
@@ -332,5 +334,116 @@ export function deriveSolanaNotExcludedOwnerAuthorityConcentration(
     },
     notExcludedTopNCurrentMintSupplyShare: a,
     notExcludedObservedPopulationTopNShare: b,
+  };
+}
+
+function validateInputV2(value: unknown): asserts value is SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2 {
+  if (!isRecord(value) || value.schemaVersion !== "solana-not-excluded-owner-authority-population-v2"
+    || value.chain !== "solana" || !canonicalAddress(value.mintAddress) || value.policyVersion !== POLICY_VERSION
+    || value.frame !== "observed_assessed_positive_owner_authorities" || !isRecord(value.source)
+    || !Array.isArray(value.subjects) || !isRecord(value.raw) || !isRecord(value.byDecision)
+    || !isRecord(value.notExcluded) || !isRecord(value.reconciliation)) fail("V2 population evidence schema or identity is malformed.");
+  const source = value.source;
+  const exactKeys = (object: Record<string, unknown>, keys: string[]) =>
+    Object.keys(object).length === keys.length && keys.every((key) => Object.hasOwn(object, key));
+  if (source.holderSnapshotSchemaVersion !== "solana-holder-snapshot-record-v2"
+    || source.exclusionAssessmentSchemaVersion !== "solana-holder-exclusion-assessment-v2"
+    || !matchesWhole(source.holderSnapshotId, /^sha256:[0-9a-f]{64}$/) || !validTimestamp(source.holderFetchedAt)
+    || !isRecord(source.acquisition) || !isRecord(source.enumeration)
+    || !["complete", "partial"].includes(source.enumeration.completeness as string)
+    || source.enumeration.slotConsistency !== "not_guaranteed" || !safeCount(source.enumeration.pageCount) || source.enumeration.pageCount < 1
+    || !Array.isArray(source.enumeration.contextSlots) || source.enumeration.contextSlots.length !== source.enumeration.pageCount
+    || !source.enumeration.contextSlots.every(safeCount)
+    || !exactKeys(source as Record<string, unknown>, ["holderSnapshotSchemaVersion", "holderSnapshotId", "exclusionAssessmentSchemaVersion", "holderFetchedAt", "acquisition", "enumeration", "amountCoverage", "currentMintSupplyRaw", "observedPositiveBalanceRaw", "supplyDifferenceRaw"])
+    || !exactKeys(source.acquisition as Record<string, unknown>, ["completeness", "stopReason", "configuredMaxPages", "requestedPageSize"])
+    || !exactKeys(source.enumeration as Record<string, unknown>, ["completeness", "slotConsistency", "pageCount", "contextSlots"])
+    || !exactKeys(source.amountCoverage as Record<string, unknown>, ["state", "unsupportedExtensionTypes", "reason"])
+    || source.acquisition.configuredMaxPages !== 20 || source.acquisition.requestedPageSize !== 5000
+    || source.acquisition.completeness !== source.enumeration.completeness
+    || (source.enumeration.completeness === "complete" ? source.acquisition.stopReason !== "provider_terminated"
+      : source.acquisition.stopReason === "page_cap" ? source.enumeration.pageCount !== 20
+        : !["request_timeout", "provider_error", "malformed_response"].includes(source.acquisition.stopReason as string) || source.enumeration.pageCount >= 20)) {
+    fail("V2 source acquisition or enumeration provenance is malformed.");
+  }
+  const coverage = source.amountCoverage;
+  if (!isRecord(coverage) || !["complete", "partial"].includes(coverage.state as string)
+    || !Array.isArray(coverage.unsupportedExtensionTypes) || !coverage.unsupportedExtensionTypes.every((x) => Number.isInteger(x) && x >= 1 && x <= 65535)
+    || (coverage.unsupportedExtensionTypes as unknown[]).some((x, i, all) => i > 0 && typeof x === "number" && typeof all[i - 1] === "number" && (all[i - 1] as number) >= x)
+    || !matchesWhole(source.currentMintSupplyRaw, UNSIGNED) || !matchesWhole(source.observedPositiveBalanceRaw, UNSIGNED)
+    || !matchesWhole(source.supplyDifferenceRaw, SIGNED)) fail("V2 amount coverage or supply values are malformed.");
+  const unsupportedExtensions = coverage.unsupportedExtensionTypes as number[];
+  if (!safeCount(value.raw.subjectCount) || !matchesWhole(value.raw.observedPositiveBalanceRaw, UNSIGNED)
+    || value.raw.subjectCount !== value.subjects.length || value.raw.observedPositiveBalanceRaw !== source.observedPositiveBalanceRaw) fail("V2 observed population summary is malformed.");
+  const totals: Totals = { exclude: { subjectCount: 0, balance: 0n }, retain: { subjectCount: 0, balance: 0n }, unresolved: { subjectCount: 0, balance: 0n } };
+  let previous: string | null = null; let balanceTotal = 0n; let notExcludedBalance = 0n; let notExcludedCount = 0;
+  for (const row of value.subjects) {
+    if (!isRecord(row) || !canonicalAddress(row.subjectAddress) || !matchesWhole(row.balanceRaw, POSITIVE)
+      || !DECISIONS.includes(row.decision as Decision) || row.decision === "exclude"
+      || (previous !== null && previous >= row.subjectAddress)) fail("V2 population subject ordering, balance, or policy decision is invalid.");
+    previous = row.subjectAddress;
+    const raw = BigInt(row.balanceRaw); balanceTotal += raw;
+    const total = totals[row.decision as Decision]; total.subjectCount += 1; total.balance += raw;
+    notExcludedBalance += raw; notExcludedCount += 1;
+  }
+  if (balanceTotal.toString() !== value.raw.observedPositiveBalanceRaw
+    || (BigInt(source.currentMintSupplyRaw) - balanceTotal).toString() !== source.supplyDifferenceRaw) fail("V2 subject totals do not reconcile with supply evidence.");
+  for (const decision of DECISIONS) {
+    const supplied = value.byDecision[decision];
+    if (!isRecord(supplied) || supplied.subjectCount !== totals[decision].subjectCount || supplied.observedBalanceRaw !== totals[decision].balance.toString()) fail("V2 decision totals do not reconcile.");
+  }
+  if (Object.keys(value.byDecision).length !== DECISIONS.length || value.notExcluded.subjectCount !== notExcludedCount
+    || value.notExcluded.observedBalanceRaw !== notExcludedBalance.toString()
+    || value.reconciliation.status !== "reconciled" || value.reconciliation.basis !== "decision_categories_partition_observed_positive_owner_authority_rows") fail("V2 not-excluded partition does not reconcile.");
+  const supplyInconsistent = BigInt(source.supplyDifferenceRaw) < 0n;
+  if (coverage.state === "complete") {
+    if (coverage.reason !== null || unsupportedExtensions.length > 0 || supplyInconsistent) fail("Complete V2 amount coverage contradicts its source evidence.");
+  } else {
+    const validSupplyReason = coverage.reason === "supply_inconsistency" && supplyInconsistent;
+    const validExtensionReason = coverage.reason === "unsupported_balance_affecting_extension" && unsupportedExtensions.length > 0 && !supplyInconsistent;
+    if (!validSupplyReason && !validExtensionReason) fail("Partial V2 amount coverage contradicts its source evidence.");
+  }
+}
+
+/** Calculates the same two descriptive metrics while withholding global Top-N under partial enumeration. */
+export function deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(
+  input: SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2,
+): SolanaNotExcludedOwnerAuthorityConcentrationEvidenceV2 {
+  validateInputV2(input);
+  const sums = rankAndSumTopN(input.subjects);
+  const source = input.source;
+  const supply = BigInt(source.currentMintSupplyRaw);
+  const difference = BigInt(source.supplyDifferenceRaw);
+  const observedTotal = BigInt(input.notExcluded.observedBalanceRaw);
+  const enumerationPartial = source.enumeration.completeness === "partial";
+  const amountPartialReasons: Array<"unsupported_balance_affecting_extension" | "supply_inconsistency"> = [];
+  if (source.amountCoverage.unsupportedExtensionTypes.length > 0) amountPartialReasons.push("unsupported_balance_affecting_extension");
+  if (difference < 0n) amountPartialReasons.push("supply_inconsistency");
+  const partialReasons: Array<"enumeration_incomplete" | "unsupported_balance_affecting_extension" | "supply_inconsistency"> = [
+    ...(enumerationPartial ? ["enumeration_incomplete" as const] : []), ...amountPartialReasons,
+  ];
+  const completeness = partialReasons.length === 0 ? "complete" as const : "partial" as const;
+  const makeNullNumerators = () => Object.fromEntries(TOP_NS.map((n) => {
+    const key = ("top" + n) as TopNKey;
+    return [key, { topN: n, numeratorRaw: null, percentage: null }];
+  })) as Record<TopNKey, { topN: SolanaNotExcludedTopN; numeratorRaw: null; percentage: null }>;
+  let metricA: SolanaNotExcludedOwnerAuthorityConcentrationEvidenceV2["notExcludedTopNCurrentMintSupplyShare"];
+  if (enumerationPartial) {
+    metricA = { status: "unavailable", basis: "current_mint_supply", denominatorRaw: source.currentMintSupplyRaw, reason: "enumeration_incomplete", ...makeNullNumerators() };
+  } else {
+    const reason = difference < 0n ? "supply_inconsistency" as const : supply === 0n ? "zero_supply" as const : source.amountCoverage.state === "partial" ? "partial_amount_coverage" as const : null;
+    metricA = reason === null
+      ? { status: "available", basis: "current_mint_supply", denominatorRaw: source.currentMintSupplyRaw, completeness: "complete", ...makeAvailableTopN(sums, source.currentMintSupplyRaw) }
+      : { status: "unavailable", basis: "current_mint_supply", denominatorRaw: source.currentMintSupplyRaw, reason, ...makeUnavailableTopN(sums) };
+  }
+  const metricB = observedTotal > 0n
+    ? { status: "available" as const, basis: "not_excluded_observed_balance_total" as const, denominatorRaw: input.notExcluded.observedBalanceRaw, completeness, partialReasons, unsupportedExtensionTypes: [...source.amountCoverage.unsupportedExtensionTypes], ...makeAvailableTopN(sums, input.notExcluded.observedBalanceRaw) }
+    : { status: "unavailable" as const, basis: "not_excluded_observed_balance_total" as const, denominatorRaw: "0" as const, reason: "zero_not_excluded_observed_balance_total" as const, completeness, partialReasons, unsupportedExtensionTypes: [...source.amountCoverage.unsupportedExtensionTypes], ...makeUnavailableTopN(sums) };
+  return {
+    schemaVersion: "solana-not-excluded-owner-authority-concentration-v2", chain: "solana", mintAddress: input.mintAddress, policyVersion: input.policyVersion,
+    source: { ...structuredClone(source), populationSchemaVersion: input.schemaVersion, exclusionAssessmentSchemaVersion: "solana-holder-exclusion-assessment-v2", holderSupplyAlignment: "not_proven_atomic" },
+    population: { subjectType: "observed_positive_solana_owner_authorities", rawSubjectCount: input.raw.subjectCount, rawObservedBalanceRaw: input.raw.observedPositiveBalanceRaw,
+      byDecision: structuredClone(input.byDecision), notExcludedSubjectCount: input.notExcluded.subjectCount, notExcludedObservedBalanceRaw: input.notExcluded.observedBalanceRaw },
+    notExcludedTopNCurrentMintSupplyShare: metricA,
+    notExcludedObservedPopulationTopNShare: metricB,
   };
 }

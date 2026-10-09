@@ -1,5 +1,7 @@
 import type { SolanaHolderStructure } from "./holders";
 import type { SolanaExclusionDecision } from "./solanaHolderExclusionAssessment";
+import type { SolanaHolderSnapshotAcquisitionV2 } from "./solanaHolderSnapshot";
+import type { SolanaHolderExclusionAssessmentV2 } from "./solanaHolderExclusionAssessment";
 
 export interface SolanaNotExcludedOwnerAuthorityPopulationEvidence {
   schemaVersion: "solana-not-excluded-owner-authority-population-v1";
@@ -38,4 +40,38 @@ export interface SolanaNotExcludedOwnerAuthorityPopulationEvidence {
     status: "reconciled";
     basis: "decision_categories_partition_observed_positive_owner_authority_rows";
   };
+}
+
+export interface SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2 {
+  schemaVersion: "solana-not-excluded-owner-authority-population-v2";
+  chain: "solana";
+  mintAddress: string;
+  policyVersion: "solana-address-exclusion-policy-v1";
+  frame: "observed_assessed_positive_owner_authorities";
+  source: {
+    holderSnapshotSchemaVersion: "solana-holder-snapshot-record-v2";
+    holderSnapshotId: string;
+    exclusionAssessmentSchemaVersion: SolanaHolderExclusionAssessmentV2["schemaVersion"];
+    holderFetchedAt: string;
+    acquisition: SolanaHolderSnapshotAcquisitionV2;
+    enumeration: {
+      completeness: "complete" | "partial";
+      slotConsistency: "not_guaranteed";
+      pageCount: number;
+      contextSlots: readonly number[];
+    };
+    amountCoverage: {
+      state: "complete" | "partial";
+      unsupportedExtensionTypes: readonly number[];
+      reason: "unsupported_balance_affecting_extension" | "supply_inconsistency" | null;
+    };
+    currentMintSupplyRaw: string;
+    observedPositiveBalanceRaw: string;
+    supplyDifferenceRaw: string;
+  };
+  subjects: SolanaNotExcludedOwnerAuthorityPopulationEvidence["subjects"];
+  raw: SolanaNotExcludedOwnerAuthorityPopulationEvidence["raw"];
+  byDecision: SolanaNotExcludedOwnerAuthorityPopulationEvidence["byDecision"];
+  notExcluded: SolanaNotExcludedOwnerAuthorityPopulationEvidence["notExcluded"];
+  reconciliation: SolanaNotExcludedOwnerAuthorityPopulationEvidence["reconciliation"];
 }

@@ -142,3 +142,73 @@ export interface SolanaAddressRoleEvidence {
   /** Positive-balance owner authorities only, sorted by canonical address. */
   ownerAuthorities: SolanaOwnerAuthorityRoleEvidence[];
 }
+
+export type SolanaAuthorityRoleSourceV2 =
+  | {
+      status: "set";
+      address: string;
+      holderPopulationRelation: "observed_positive";
+      basis: "solana_mint_resolution_base_field";
+      sourceObservation: { evidence: "solana_mint_resolution"; fetchedAt: null; contextSlot: null };
+    }
+  | {
+      status: "set";
+      address: string;
+      holderPopulationRelation: "not_observed_positive";
+      basis: "solana_mint_resolution_base_field";
+      sourceObservation: { evidence: "solana_mint_resolution"; fetchedAt: null; contextSlot: null };
+    }
+  | {
+      status: "set";
+      address: string;
+      holderPopulationRelation: "unknown";
+      reason: "enumeration_incomplete" | "amount_coverage_partial" | "supply_inconsistency";
+      basis: "solana_mint_resolution_base_field";
+      sourceObservation: { evidence: "solana_mint_resolution"; fetchedAt: null; contextSlot: null };
+    }
+  | {
+      status: "unset";
+      address: null;
+      holderPopulationRelation: "not_applicable";
+      basis: "solana_mint_resolution_base_field";
+      sourceObservation: { evidence: "solana_mint_resolution"; fetchedAt: null; contextSlot: null };
+    };
+
+export interface SolanaAddressRoleHolderSourceV2 {
+  evidence: "solana_holder_snapshot_record_v2";
+  snapshotSchemaVersion: "solana-holder-snapshot-record-v2";
+  snapshotId: string;
+  fetchedAt: string;
+  tokenProgram: "spl-token" | "token-2022";
+  decimals: number;
+  enumeration: {
+    completeness: "complete" | "partial";
+    slotConsistency: "not_guaranteed";
+    pageCount: number;
+    contextSlots: readonly number[];
+  };
+  acquisition: {
+    stopReason: "provider_terminated" | "page_cap" | "request_timeout" | "provider_error" | "malformed_response";
+    configuredMaxPages: 20;
+    requestedPageSize: 5000;
+  };
+  amountCoverage: {
+    state: "complete" | "partial";
+    unsupportedExtensionTypes: readonly number[];
+    reason: "unsupported_balance_affecting_extension" | "supply_inconsistency" | null;
+  };
+  currentMintSupplyRaw: string;
+  supplyDifferenceRaw: string;
+  observedPositiveOwnerAuthorityCount: number;
+}
+
+export interface SolanaAddressRoleEvidenceV2 {
+  schemaVersion: "solana-address-role-evidence-v2";
+  chain: "solana";
+  mintAddress: string;
+  holderSource: SolanaAddressRoleHolderSourceV2;
+  baseMintAuthoritySource: SolanaAuthorityRoleSourceV2;
+  baseFreezeAuthoritySource: SolanaAuthorityRoleSourceV2;
+  marketSource: SolanaAddressRoleMarketSource;
+  ownerAuthorities: SolanaOwnerAuthorityRoleEvidence[];
+}

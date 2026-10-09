@@ -1,6 +1,11 @@
 import type { SolanaHolderSnapshotRecord } from "../types/solanaHolderSnapshot";
 import type { SolanaHolderExclusionAssessment, SolanaExclusionDecision } from "../types/solanaHolderExclusionAssessment";
 import type { SolanaNotExcludedOwnerAuthorityPopulationEvidence } from "../types/solanaNotExcludedOwnerAuthorityPopulation";
+import type { SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2 } from "../types/solanaNotExcludedOwnerAuthorityPopulation";
+import type { SolanaHolderSnapshotRecordV2 } from "../types/solanaHolderSnapshot";
+import type { SolanaHolderExclusionAssessmentV2 } from "../types/solanaHolderExclusionAssessment";
+import { assessSolanaHolderExclusionsV2 } from "./solanaHolderExclusionAssessment";
+import { validateSolanaHolderSnapshotRecordV2 } from "./solanaHolderSnapshotComparison";
 import { SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION } from "./solanaHolderExclusionAssessment";
 import { validateSolanaHolderSnapshotRecord } from "./solanaHolderSnapshotComparison";
 import { decodeSolanaPublicKey, encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
@@ -365,5 +370,88 @@ export function deriveSolanaNotExcludedOwnerAuthorityPopulation(
       status: "reconciled",
       basis: "decision_categories_partition_observed_positive_owner_authority_rows",
     },
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value as Record<string, unknown>).sort().map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Partitions exactly the observed assessed rows; the frame remains explicit for partial enumeration. */
+export function deriveSolanaNotExcludedOwnerAuthorityPopulationV2(
+  holderSnapshot: SolanaHolderSnapshotRecordV2,
+  assessment: SolanaHolderExclusionAssessmentV2,
+): SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2 {
+  try { validateSolanaHolderSnapshotRecordV2(holderSnapshot); } catch { fail("V2 holder snapshot record is invalid."); }
+  const snapshot = holderSnapshot.snapshot;
+  if (!isObject(assessment) || assessment.schemaVersion !== "solana-holder-exclusion-assessment-v2"
+    || assessment.chain !== "solana" || assessment.mintAddress !== snapshot.mintAddress
+    || assessment.policyVersion !== SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION
+    || !isObject(assessment.sourceEvidence)
+    || assessment.sourceEvidence.holderSnapshotSchemaVersion !== holderSnapshot.schemaVersion
+    || assessment.sourceEvidence.holderSnapshotId !== holderSnapshot.snapshotId
+    || assessment.sourceEvidence.holderFetchedAt !== snapshot.fetchedAt
+    || assessment.sourceEvidence.currentMintSupplyRaw !== snapshot.currentMintSupplyRaw
+    || assessment.sourceEvidence.supplyDifferenceRaw !== snapshot.supplyDifferenceRaw
+    || !sameEnumeration(assessment.sourceEvidence.holderEnumeration, snapshot.enumeration)
+    || !sameCoverage(assessment.sourceEvidence.holderAmountCoverage, snapshot.amountCoverage)
+    || stableJson(assessment.sourceEvidence.holderAcquisition) !== stableJson(holderSnapshot.acquisition)
+    || !Array.isArray(assessment.subjects)) fail("V2 exclusion assessment provenance is incompatible with the snapshot.");
+
+  const roleEvidence = {
+    schemaVersion: "solana-address-role-evidence-v2" as const, chain: "solana" as const, mintAddress: snapshot.mintAddress,
+    holderSource: {
+      evidence: "solana_holder_snapshot_record_v2" as const, snapshotSchemaVersion: holderSnapshot.schemaVersion,
+      snapshotId: holderSnapshot.snapshotId, fetchedAt: snapshot.fetchedAt, tokenProgram: snapshot.tokenProgram,
+      decimals: snapshot.decimals, enumeration: snapshot.enumeration, acquisition: holderSnapshot.acquisition,
+      amountCoverage: snapshot.amountCoverage, currentMintSupplyRaw: snapshot.currentMintSupplyRaw,
+      supplyDifferenceRaw: snapshot.supplyDifferenceRaw, observedPositiveOwnerAuthorityCount: snapshot.rawOwnerCount,
+    },
+    baseMintAuthoritySource: assessment.sourceEvidence.baseMintAuthoritySource,
+    baseFreezeAuthoritySource: assessment.sourceEvidence.baseFreezeAuthoritySource,
+    marketSource: assessment.sourceEvidence.marketSource,
+    ownerAuthorities: assessment.subjects.map((subject) => ({ ownerAuthorityAddress: subject.subjectAddress, findings: subject.ruleAssessments.map((item) => item.finding) })),
+  };
+  let recomputed: SolanaHolderExclusionAssessmentV2;
+  try { recomputed = assessSolanaHolderExclusionsV2({ holderSnapshot, addressRoleEvidence: roleEvidence as never }); }
+  catch { fail("V2 exclusion assessment is malformed or contradicts the current policy."); }
+  if (stableJson(recomputed) !== stableJson(assessment)) fail("V2 exclusion assessment decisions or summaries do not reconcile.");
+
+  const sorted = [...assessment.subjects].sort((a, b) => a.subjectAddress < b.subjectAddress ? -1 : a.subjectAddress > b.subjectAddress ? 1 : 0);
+  const totals = new Map<SolanaExclusionDecision, { count: number; balance: bigint }>(DECISIONS.map((decision) => [decision, { count: 0, balance: 0n }]));
+  let rawBalance = 0n;
+  for (const row of sorted) {
+    if (!canonicalAddress(row.subjectAddress) || !/^[1-9][0-9]*$/.test(row.balanceRaw) || row.decision === "exclude") fail("V2 assessment contains an invalid or policy-forbidden subject.");
+    rawBalance += BigInt(row.balanceRaw);
+    const total = totals.get(row.decision)!; total.count += 1; total.balance += BigInt(row.balanceRaw);
+  }
+  const expectedRows = new Map(snapshot.rawOwnerAuthorities.map((row) => [row.ownerAddress, row.balanceRaw]));
+  if (sorted.length !== expectedRows.size || sorted.some((row) => expectedRows.get(row.subjectAddress) !== row.balanceRaw)
+    || rawBalance.toString() !== snapshot.observedPositiveBalanceRaw) fail("V2 assessment subject set or balances differ from observed snapshot rows.");
+  const byDecision = Object.fromEntries(DECISIONS.map((decision) => {
+    const entry = totals.get(decision)!; return [decision, { subjectCount: entry.count, observedBalanceRaw: entry.balance.toString() }];
+  })) as SolanaNotExcludedOwnerAuthorityPopulationEvidenceV2["byDecision"];
+  const retain = totals.get("retain")!; const unresolved = totals.get("unresolved")!;
+  const observedBalanceRaw = rawBalance.toString();
+  const supplyDifferenceRaw = (BigInt(snapshot.currentMintSupplyRaw) - rawBalance).toString();
+  if (supplyDifferenceRaw !== snapshot.supplyDifferenceRaw) fail("V2 observed balance total does not reconcile with snapshot supply difference.");
+  return {
+    schemaVersion: "solana-not-excluded-owner-authority-population-v2", chain: "solana", mintAddress: snapshot.mintAddress,
+    policyVersion: SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION, frame: "observed_assessed_positive_owner_authorities",
+    source: {
+      holderSnapshotSchemaVersion: holderSnapshot.schemaVersion, holderSnapshotId: holderSnapshot.snapshotId,
+      exclusionAssessmentSchemaVersion: assessment.schemaVersion, holderFetchedAt: snapshot.fetchedAt,
+      acquisition: structuredClone(holderSnapshot.acquisition), enumeration: structuredClone(snapshot.enumeration),
+      amountCoverage: structuredClone(snapshot.amountCoverage), currentMintSupplyRaw: snapshot.currentMintSupplyRaw,
+      observedPositiveBalanceRaw: observedBalanceRaw, supplyDifferenceRaw,
+    },
+    subjects: sorted.map(({ subjectAddress, balanceRaw, decision }) => ({ subjectAddress, balanceRaw, decision })),
+    raw: { subjectCount: sorted.length, observedPositiveBalanceRaw: observedBalanceRaw }, byDecision,
+    notExcluded: { subjectCount: retain.count + unresolved.count, observedBalanceRaw: (retain.balance + unresolved.balance).toString() },
+    reconciliation: { status: "reconciled", basis: "decision_categories_partition_observed_positive_owner_authority_rows" },
   };
 }

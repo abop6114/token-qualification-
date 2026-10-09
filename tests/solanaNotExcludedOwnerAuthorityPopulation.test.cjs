@@ -1,10 +1,13 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { createSolanaHolderSnapshotRecord } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
+const { createSolanaHolderSnapshotRecord, createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
 const { deriveSolanaAddressRoleEvidence } = require("../dist/normalization/solanaAddressRoleEvidence.js");
+const { deriveSolanaAddressRoleEvidenceV2 } = require("../dist/normalization/solanaAddressRoleEvidence.js");
 const { assessSolanaHolderExclusions } = require("../dist/normalization/solanaHolderExclusionAssessment.js");
+const { assessSolanaHolderExclusionsV2 } = require("../dist/normalization/solanaHolderExclusionAssessment.js");
 const { normalizeMarketSnapshot } = require("../dist/normalization/marketSnapshot.js");
 const { deriveSolanaNotExcludedOwnerAuthorityPopulation } = require("../dist/normalization/solanaNotExcludedOwnerAuthorityPopulation.js");
+const { deriveSolanaNotExcludedOwnerAuthorityPopulationV2 } = require("../dist/normalization/solanaNotExcludedOwnerAuthorityPopulation.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
 const MINT = "5CuomWu7HfqcR9z2NZ1QN7HJmRGwyp4JrFQ6SWmntaJP";
@@ -86,6 +89,33 @@ function derive(holder = holderStructure(), assessment = assessmentFor(holder)) 
   return deriveSolanaNotExcludedOwnerAuthorityPopulation(createSolanaHolderSnapshotRecord(holder), assessment);
 }
 
+function snapshotV2(holder, partial = false) {
+  const value = structuredClone(holder);
+  if (partial) {
+    value.enumeration.completeness = "partial";
+    value.concentration = Object.fromEntries([1, 5, 10, 20].map((n) => ["top" + n, {
+      status: "unavailable", topN: n, numeratorRaw: null, denominatorRaw: value.currentMintSupplyRaw,
+      denominatorBasis: "current_mint_supply", percentage: null, reason: "enumeration_incomplete",
+    }]));
+    value.acquisition = { stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000 };
+    return createSolanaHolderSnapshotRecordV2(value);
+  }
+  return createSolanaHolderSnapshotRecordV2(value, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+}
+
+function assessV2(holder, partial = false) {
+  const record = snapshotV2(holder, partial);
+  const resolution = {
+    exists: true, isMint: true, mintAddress: holder.mintAddress, tokenProgram: holder.tokenProgram,
+    decimals: holder.decimals, rawSupply: holder.currentMintSupplyRaw,
+    baseAuthorities: { mintAuthority: { status: "set", address: OWNER_A }, freezeAuthority: { status: "unset", address: null } },
+  };
+  const roles = deriveSolanaAddressRoleEvidenceV2(resolution, record, {
+    status: "available", snapshot: normalizeMarketSnapshot("solana", holder.mintAddress, [], MARKET_AT),
+  });
+  return { record, assessment: assessSolanaHolderExclusionsV2({ holderSnapshot: record, addressRoleEvidence: roles }) };
+}
+
 test("valid current-policy population partitions raw rows and includes retain and unresolved", () => {
   const holder = holderStructure();
   const result = derive(holder);
@@ -98,6 +128,56 @@ test("valid current-policy population partitions raw rows and includes retain an
   });
   assert.deepEqual(result.notExcluded, { subjectCount: 3, observedBalanceRaw: "125" });
   assert.equal(result.reconciliation.basis, "decision_categories_partition_observed_positive_owner_authority_rows");
+});
+
+test("V2 complete population matches V1 membership and balance partition", () => {
+  const holder = holderStructure();
+  const { record, assessment } = assessV2(holder);
+  const v1 = derive(holder);
+  const v2 = deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, assessment);
+  assert.equal(v2.schemaVersion, "solana-not-excluded-owner-authority-population-v2");
+  assert.equal(v2.frame, "observed_assessed_positive_owner_authorities");
+  assert.deepEqual(v2.subjects, v1.subjects);
+  assert.deepEqual(v2.byDecision, v1.byDecision);
+  assert.deepEqual(v2.notExcluded, v1.notExcluded);
+  assert.equal(v2.source.holderSnapshotId, record.snapshotId);
+});
+
+test("V2 partial population preserves exact observed rows and partial acquisition provenance", () => {
+  const holder = holderStructure({ balances: [[OWNER_A, "100"], [OWNER_B, "20"]] });
+  const { record, assessment } = assessV2(holder, true);
+  const v2 = deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, assessment);
+  assert.equal(v2.source.enumeration.completeness, "partial");
+  assert.equal(v2.source.acquisition.stopReason, "request_timeout");
+  assert.equal(v2.raw.observedPositiveBalanceRaw, "120");
+  assert.deepEqual(v2.subjects.map((row) => row.subjectAddress), [OWNER_A, OWNER_B].sort());
+  assert.equal(v2.notExcluded.observedBalanceRaw, "120");
+});
+
+test("V2 rejects a forged exclusion and mismatched source snapshot ID", () => {
+  const { record, assessment } = assessV2(holderStructure());
+  const forged = structuredClone(assessment);
+  forged.subjects[0].decision = "exclude";
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, forged));
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, { ...assessment, sourceEvidence: { ...assessment.sourceEvidence, holderSnapshotId: "sha256:" + "f".repeat(64) } }));
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, { ...assessment, policyVersion: "other-policy" }));
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, { ...assessment, subjects: assessment.subjects.slice(1) }));
+  const changedBalance = structuredClone(assessment);
+  changedBalance.subjects[0].balanceRaw = "999";
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, changedBalance));
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, assess(holderStructure())));
+});
+
+test("V2 output and validation do not mutate the snapshot or assessment inputs", () => {
+  const { record, assessment } = assessV2(holderStructure(), true);
+  const beforeRecord = structuredClone(record);
+  const beforeAssessment = structuredClone(assessment);
+  const result = deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, assessment);
+  assert.deepEqual(record, beforeRecord);
+  assert.deepEqual(assessment, beforeAssessment);
+  result.subjects[0].balanceRaw = "777";
+  assert.deepEqual(record, beforeRecord);
+  assert.deepEqual(assessment, beforeAssessment);
 });
 
 test("retain remains included in notExcluded", () => {

@@ -5,6 +5,8 @@ import type {
   NormalizedPoolMarket,
 } from "../types/market";
 import type { SolanaHolderStructure } from "../types/holders";
+import type { SolanaHolderSnapshotRecordV2 } from "../types/solanaHolderSnapshot";
+import { validateSolanaHolderSnapshotRecordV2 } from "./solanaHolderSnapshotComparison";
 import type {
   SolanaAddressRoleEvidence,
   SolanaAddressRoleMarketInput,
@@ -14,6 +16,8 @@ import type {
   SolanaOwnerAuthorityRoleEvidence,
   SolanaBaseAuthorityAddressRoleFinding,
   SolanaDexPoolAddressRoleFinding,
+  SolanaAddressRoleEvidenceV2,
+  SolanaAuthorityRoleSourceV2,
 } from "../types/solanaAddressRoleEvidence";
 import { decodeSolanaPublicKey, encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 
@@ -162,6 +166,23 @@ function authoritySource(
     basis: "solana_mint_resolution_base_field",
     sourceObservation: { evidence: "solana_mint_resolution", fetchedAt: null, contextSlot: null },
   };
+}
+
+function authoritySourceV2(
+  authority: { status: "set"; address: string } | { status: "unset"; address: null },
+  holderAddresses: ReadonlySet<string>,
+  snapshot: SolanaHolderSnapshotRecordV2["snapshot"],
+): SolanaAuthorityRoleSourceV2 {
+  const base = { basis: "solana_mint_resolution_base_field" as const, sourceObservation: { evidence: "solana_mint_resolution" as const, fetchedAt: null, contextSlot: null } };
+  if (authority.status === "unset") return { status: "unset", address: null, holderPopulationRelation: "not_applicable", ...base };
+  if (holderAddresses.has(authority.address)) return { status: "set", address: authority.address, holderPopulationRelation: "observed_positive", ...base };
+  let reason: "enumeration_incomplete" | "amount_coverage_partial" | "supply_inconsistency" | null = null;
+  if (snapshot.enumeration.completeness !== "complete") reason = "enumeration_incomplete";
+  else if (snapshot.amountCoverage.reason === "supply_inconsistency" || BigInt(snapshot.supplyDifferenceRaw) < 0n) reason = "supply_inconsistency";
+  else if (snapshot.amountCoverage.state !== "complete") reason = "amount_coverage_partial";
+  return reason === null
+    ? { status: "set", address: authority.address, holderPopulationRelation: "not_observed_positive", ...base }
+    : { status: "set", address: authority.address, holderPopulationRelation: "unknown", reason, ...base };
 }
 
 function baseFinding(
@@ -377,5 +398,87 @@ export function deriveSolanaAddressRoleEvidence(
     baseFreezeAuthoritySource: freezeAuthoritySource,
     marketSource,
     ownerAuthorities,
+  };
+}
+
+/** Correlates V2 snapshot evidence without treating an absent partial-row subject as absent population-wide. */
+export function deriveSolanaAddressRoleEvidenceV2(
+  mintResolution: SolanaMintResolution,
+  holderSnapshot: SolanaHolderSnapshotRecordV2,
+  marketInput: SolanaAddressRoleMarketInput,
+): SolanaAddressRoleEvidenceV2 {
+  try { validateSolanaHolderSnapshotRecordV2(holderSnapshot); } catch { fail("V2 holder snapshot record is invalid."); }
+  const snapshot = holderSnapshot.snapshot;
+  const mintAddress = snapshot.mintAddress;
+  assertMintResolution(mintResolution, mintAddress);
+  if (snapshot.chain !== "solana" || mintResolution.tokenProgram !== snapshot.tokenProgram
+    || mintResolution.decimals !== snapshot.decimals || mintResolution.rawSupply !== snapshot.currentMintSupplyRaw) {
+    fail("Mint resolution does not match the V2 holder snapshot identity or supply.");
+  }
+  if (!isObject(marketInput) || marketInput.status !== "available" && marketInput.status !== "unavailable") fail("Solana market evidence input is malformed.");
+
+  const holderAddresses = new Set(snapshot.rawOwnerAuthorities.map((row) => row.ownerAddress));
+  const mintAuthoritySource = authoritySourceV2(mintResolution.baseAuthorities.mintAuthority, holderAddresses, snapshot);
+  const freezeAuthoritySource = authoritySourceV2(mintResolution.baseAuthorities.freezeAuthority, holderAddresses, snapshot);
+  let invalidPoolCount = 0;
+  const invalidPoolAddresses: string[] = [];
+  const matchesByAddress = new Map<string, Map<string, SolanaPoolAddressMatch>>();
+  const ambiguousPoolDexIds = new Map<string, Set<string>>();
+  let marketSource: SolanaAddressRoleMarketSource;
+  if (marketInput.status === "unavailable") {
+    if (marketInput.provider !== "dexscreener" || (marketInput.reason !== "provider_error" && marketInput.reason !== "malformed_response")) fail("Solana market-unavailable reason is malformed.");
+    marketSource = { status: "unavailable", provider: "dexscreener", chain: "solana", mintAddress, reason: marketInput.reason };
+  } else {
+    assertMarketSnapshot(marketInput.snapshot, mintAddress);
+    let validPoolCount = 0;
+    for (const pool of marketInput.snapshot.pools as readonly NormalizedPoolMarket[]) {
+      if (!isCanonicalPublicKey(pool.poolAddress)) {
+        invalidPoolCount += 1;
+        if (typeof pool.poolAddress === "string") invalidPoolAddresses.push(pool.poolAddress);
+        continue;
+      }
+      validPoolCount += 1;
+      const match: SolanaPoolAddressMatch = { poolAddress: pool.poolAddress, dexId: pool.dexId, chain: "solana", mintAddress, provenance: { ...marketInput.snapshot.provenance } };
+      const prior = matchesByAddress.get(pool.poolAddress);
+      if (prior === undefined) matchesByAddress.set(pool.poolAddress, new Map([[pool.dexId, match]]));
+      else {
+        prior.set(pool.dexId, match);
+        if (prior.size > 1) ambiguousPoolDexIds.set(pool.poolAddress, new Set(prior.keys()));
+      }
+    }
+    marketSource = makeMarketSource(marketInput, mintAddress, invalidPoolCount, invalidPoolAddresses, validPoolCount, [...ambiguousPoolDexIds.keys()]);
+  }
+
+  const ownerAuthorities = snapshot.rawOwnerAuthorities.map((owner): SolanaOwnerAuthorityRoleEvidence => {
+    let dexFinding: SolanaDexPoolAddressRoleFinding;
+    if (marketInput.status === "unavailable") dexFinding = { role: "dexscreener_reported_pool_address", status: "unavailable", ownerAuthorityAddress: owner.ownerAddress, reason: "market_source_unavailable" };
+    else {
+      const conflictingDexIds = ambiguousPoolDexIds.get(owner.ownerAddress);
+      const matches = matchesByAddress.get(owner.ownerAddress);
+      if (conflictingDexIds !== undefined) dexFinding = { role: "dexscreener_reported_pool_address", status: "ambiguous", ownerAuthorityAddress: owner.ownerAddress, poolAddress: owner.ownerAddress, conflictingDexIds: [...conflictingDexIds].sort(), provenance: { ...marketInput.snapshot.provenance } };
+      else if (matches !== undefined) dexFinding = poolMatch(owner.ownerAddress, [...matches.values()], invalidPoolCount);
+      else if (invalidPoolCount > 0) dexFinding = { role: "dexscreener_reported_pool_address", status: "unavailable", ownerAuthorityAddress: owner.ownerAddress, reason: "malformed_pool_address_present" };
+      else if (ambiguousPoolDexIds.size > 0) dexFinding = { role: "dexscreener_reported_pool_address", status: "unavailable", ownerAuthorityAddress: owner.ownerAddress, reason: "conflicting_pool_address_evidence" };
+      else dexFinding = { role: "dexscreener_reported_pool_address", status: "no_match_in_examined_evidence", ownerAuthorityAddress: owner.ownerAddress, examinedPoolCount: matchesByAddress.size, provenance: { ...marketInput.snapshot.provenance } };
+    }
+    return { ownerAuthorityAddress: owner.ownerAddress, findings: [
+      baseFinding("base_mint_authority_address", owner.ownerAddress, mintResolution.baseAuthorities.mintAuthority),
+      baseFinding("base_freeze_authority_address", owner.ownerAddress, mintResolution.baseAuthorities.freezeAuthority),
+      dexFinding,
+    ] };
+  }).sort((left, right) => left.ownerAuthorityAddress < right.ownerAuthorityAddress ? -1 : left.ownerAuthorityAddress > right.ownerAuthorityAddress ? 1 : 0);
+
+  return {
+    schemaVersion: "solana-address-role-evidence-v2", chain: "solana", mintAddress,
+    holderSource: {
+      evidence: "solana_holder_snapshot_record_v2", snapshotSchemaVersion: holderSnapshot.schemaVersion,
+      snapshotId: holderSnapshot.snapshotId, fetchedAt: snapshot.fetchedAt, tokenProgram: snapshot.tokenProgram,
+      decimals: snapshot.decimals,
+      enumeration: structuredClone(snapshot.enumeration), acquisition: structuredClone(holderSnapshot.acquisition),
+      amountCoverage: structuredClone(snapshot.amountCoverage), currentMintSupplyRaw: snapshot.currentMintSupplyRaw,
+      supplyDifferenceRaw: snapshot.supplyDifferenceRaw, observedPositiveOwnerAuthorityCount: snapshot.rawOwnerCount,
+    },
+    baseMintAuthoritySource: mintAuthoritySource, baseFreezeAuthoritySource: freezeAuthoritySource,
+    marketSource, ownerAuthorities,
   };
 }

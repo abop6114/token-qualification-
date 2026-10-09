@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { deriveSolanaAddressRoleEvidence } = require("../dist/normalization/solanaAddressRoleEvidence.js");
+const { deriveSolanaAddressRoleEvidenceV2 } = require("../dist/normalization/solanaAddressRoleEvidence.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
 const { normalizeMarketSnapshot } = require("../dist/normalization/marketSnapshot.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
@@ -101,6 +103,48 @@ function derive({
   return deriveSolanaAddressRoleEvidence(resolution, holder, market);
 }
 
+function snapshotV2(holder, partial = false) {
+  const value = structuredClone(holder);
+  value.rawOwnerAuthorities.sort((a, b) => BigInt(a.balanceRaw) > BigInt(b.balanceRaw) ? -1
+    : BigInt(a.balanceRaw) < BigInt(b.balanceRaw) ? 1 : a.ownerAddress < b.ownerAddress ? -1 : 1);
+  const total = value.rawOwnerAuthorities.reduce((sum, row) => sum + BigInt(row.balanceRaw), 0n);
+  value.observedPositiveBalanceRaw = total.toString();
+  value.supplyDifferenceRaw = (BigInt(value.currentMintSupplyRaw) - total).toString();
+  value.tokenAccountStateSummary.initialized.observedBalanceRaw = total.toString();
+  value.tokenAccountStateSummary.initialized.positiveBalanceTokenAccountCount = value.rawOwnerAuthorities.length;
+  for (const n of [1, 5, 10, 20]) {
+    const numerator = value.rawOwnerAuthorities.slice(0, n).reduce((sum, row) => sum + BigInt(row.balanceRaw), 0n);
+    if (BigInt(value.currentMintSupplyRaw) === 0n || total > BigInt(value.currentMintSupplyRaw)) {
+      value.concentration["top" + n] = {
+        status: "unavailable", topN: n, numeratorRaw: null, denominatorRaw: value.currentMintSupplyRaw,
+        denominatorBasis: "current_mint_supply", percentage: null,
+        reason: total > BigInt(value.currentMintSupplyRaw) ? "supply_inconsistency" : "zero_supply",
+      };
+      continue;
+    }
+    const scaled = (numerator * 100n * 1_000_000n + BigInt(value.currentMintSupplyRaw) / 2n) / BigInt(value.currentMintSupplyRaw);
+    value.concentration["top" + n] = {
+      status: "available", topN: n, numeratorRaw: numerator.toString(), denominatorRaw: value.currentMintSupplyRaw,
+      denominatorBasis: "current_mint_supply",
+      percentage: (scaled / 1_000_000n).toString() + "." + (scaled % 1_000_000n).toString().padStart(6, "0"),
+    };
+  }
+  if (partial) {
+    value.enumeration.completeness = "partial";
+    value.concentration = Object.fromEntries([1, 5, 10, 20].map((n) => ["top" + n, {
+      status: "unavailable", topN: n, numeratorRaw: null, denominatorRaw: value.currentMintSupplyRaw,
+      denominatorBasis: "current_mint_supply", percentage: null, reason: "enumeration_incomplete",
+    }]));
+    value.acquisition = { stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000 };
+    return createSolanaHolderSnapshotRecordV2(value);
+  }
+  return createSolanaHolderSnapshotRecordV2(value, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+}
+
+function deriveV2({ resolution = mintResolution(), holder = holderStructure(), partial = false, market = { status: "available", snapshot: marketSnapshot() } } = {}) {
+  return deriveSolanaAddressRoleEvidenceV2(resolution, snapshotV2(holder, partial), market);
+}
+
 function finding(result, owner, role) {
   const entry = result.ownerAuthorities.find((item) => item.ownerAuthorityAddress === owner);
   assert.ok(entry, `missing holder authority ${owner}`);
@@ -117,6 +161,73 @@ test("matches a positive owner authority to the set base mint authority", () => 
     sourceEvidence: "solana_mint_resolution_base_field",
     sourceObservation: { fetchedAt: null, contextSlot: null },
   });
+});
+
+test("V2 complete snapshot preserves V1 role findings and records snapshot provenance", () => {
+  const holder = holderStructure();
+  const v1 = derive({ holder });
+  const v2 = deriveV2({ holder });
+  assert.equal(v2.schemaVersion, "solana-address-role-evidence-v2");
+  assert.deepEqual(v2.ownerAuthorities, v1.ownerAuthorities);
+  assert.equal(v2.holderSource.snapshotSchemaVersion, "solana-holder-snapshot-record-v2");
+  assert.match(v2.holderSource.snapshotId, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(JSON.stringify(v2).includes("paginationKey"), false);
+});
+
+test("V2 partial frame keeps exact observed matches and makes absent set authorities unknown", () => {
+  const holder = holderStructure([MINT_AUTHORITY, POOL_A]);
+  const result = deriveV2({ holder, partial: true });
+  assert.equal(result.baseMintAuthoritySource.holderPopulationRelation, "observed_positive");
+  assert.equal(finding(result, MINT_AUTHORITY, "base_mint_authority_address").status, "observed_match");
+  assert.equal(result.baseFreezeAuthoritySource.holderPopulationRelation, "unknown");
+  assert.equal(result.baseFreezeAuthoritySource.reason, "enumeration_incomplete");
+  assert.equal(finding(result, POOL_A, "dexscreener_reported_pool_address").status, "observed_match");
+  assert.equal(result.ownerAuthorities.some((row) => row.ownerAuthorityAddress === FREEZE_AUTHORITY), false);
+  const freezeObserved = deriveV2({ holder: holderStructure([FREEZE_AUTHORITY, POOL_A]), partial: true });
+  assert.equal(freezeObserved.baseFreezeAuthoritySource.holderPopulationRelation, "observed_positive");
+  assert.equal(freezeObserved.baseMintAuthoritySource.holderPopulationRelation, "unknown");
+  assert.equal(finding(freezeObserved, FREEZE_AUTHORITY, "base_freeze_authority_address").status, "observed_match");
+});
+
+test("V2 complete absence still requires complete amount and supply evidence", () => {
+  const complete = deriveV2({ holder: holderStructure([HOLDER_A]) });
+  assert.equal(complete.baseFreezeAuthoritySource.holderPopulationRelation, "not_observed_positive");
+
+  const amountPartial = holderStructure([HOLDER_A]);
+  amountPartial.amountCoverage = { state: "partial", unsupportedExtensionTypes: [1], reason: "unsupported_balance_affecting_extension" };
+  const byExtension = deriveV2({ holder: amountPartial, resolution: mintResolution() });
+  assert.equal(byExtension.baseFreezeAuthoritySource.holderPopulationRelation, "unknown");
+  assert.equal(byExtension.baseFreezeAuthoritySource.reason, "amount_coverage_partial");
+
+  const inconsistent = holderStructure([HOLDER_A, HOLDER_B, MINT_AUTHORITY]);
+  inconsistent.currentMintSupplyRaw = "1";
+  inconsistent.supplyDifferenceRaw = "-2";
+  inconsistent.amountCoverage = { state: "partial", unsupportedExtensionTypes: [], reason: "supply_inconsistency" };
+  const bySupply = deriveV2({ holder: inconsistent, resolution: { ...mintResolution(), rawSupply: "1" } });
+  assert.equal(bySupply.baseFreezeAuthoritySource.holderPopulationRelation, "unknown");
+  assert.equal(bySupply.baseFreezeAuthoritySource.reason, "supply_inconsistency");
+});
+
+test("V2 output is independent of later mutation to the snapshot, mint, and market inputs", () => {
+  const resolution = mintResolution();
+  const snapshot = snapshotV2(holderStructure());
+  const market = { status: "available", snapshot: marketSnapshot() };
+  const result = deriveSolanaAddressRoleEvidenceV2(resolution, snapshot, market);
+  const sourceId = result.holderSource.snapshotId;
+  resolution.baseAuthorities.mintAuthority.address = HOLDER_A;
+  market.snapshot.pools.length = 0;
+  assert.equal(result.holderSource.snapshotId, sourceId);
+  assert.equal(result.ownerAuthorities.length, snapshot.snapshot.rawOwnerCount);
+});
+
+test("V2 rejects mint identity, token program, decimals, and raw supply mismatches", () => {
+  const record = snapshotV2(holderStructure());
+  for (const resolution of [
+    { ...mintResolution(), mintAddress: OTHER_MINT },
+    { ...mintResolution(), tokenProgram: "token-2022" },
+    { ...mintResolution(), decimals: 7 },
+    { ...mintResolution(), rawSupply: "999" },
+  ]) assert.throws(() => deriveSolanaAddressRoleEvidenceV2(resolution, record, { status: "available", snapshot: marketSnapshot() }));
 });
 
 test("matches a positive owner authority to the set base freeze authority", () => {

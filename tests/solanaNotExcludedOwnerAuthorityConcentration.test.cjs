@@ -2,6 +2,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const { test } = require("node:test");
 const { deriveSolanaNotExcludedOwnerAuthorityConcentration } = require("../dist/normalization/solanaNotExcludedOwnerAuthorityConcentration.js");
+const { deriveSolanaNotExcludedOwnerAuthorityConcentrationV2 } = require("../dist/normalization/solanaNotExcludedOwnerAuthorityConcentration.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
+const { deriveSolanaAddressRoleEvidenceV2 } = require("../dist/normalization/solanaAddressRoleEvidence.js");
+const { assessSolanaHolderExclusionsV2 } = require("../dist/normalization/solanaHolderExclusionAssessment.js");
+const { deriveSolanaNotExcludedOwnerAuthorityPopulationV2 } = require("../dist/normalization/solanaNotExcludedOwnerAuthorityPopulation.js");
+const { normalizeMarketSnapshot } = require("../dist/normalization/marketSnapshot.js");
 const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { decodeSolanaPublicKey, encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
@@ -115,16 +121,42 @@ function tokenAccount(ownerByte, amount, accountByte = ownerByte + 50) {
   };
 }
 
-function rawHolder(rows, supply) {
+function rawHolder(rows, supply, mintExtensionTypes = []) {
   return normalizeSolanaHolderStructure({
     mintAddress: MINT,
     tokenProgram: "spl-token",
     decimals: 6,
     currentMintSupplyRaw: String(supply),
-    mintExtensionTypes: [],
+    mintExtensionTypes,
     pages: [{ accounts: rows.map((row) => tokenAccount(row.seed, row.balanceRaw)), paginationKey: null, contextSlot: 700 }],
     fetchedAt: FETCHED_AT,
   });
+}
+
+function v2Pipeline(rows, options = {}) {
+  const holder = rawHolder(rows, options.supply ?? "1000", options.mintExtensionTypes ?? []);
+  const partial = options.partial === true;
+  let record;
+  if (partial) {
+    holder.enumeration.completeness = "partial";
+    holder.concentration = Object.fromEntries([1, 5, 10, 20].map((n) => ["top" + n, {
+      status: "unavailable", topN: n, numeratorRaw: null, denominatorRaw: holder.currentMintSupplyRaw,
+      denominatorBasis: "current_mint_supply", percentage: null, reason: "enumeration_incomplete",
+    }]));
+    holder.acquisition = { stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000 };
+    record = createSolanaHolderSnapshotRecordV2(holder);
+  } else record = createSolanaHolderSnapshotRecordV2(holder, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+  const resolution = {
+    exists: true, isMint: true, mintAddress: MINT, tokenProgram: "spl-token", decimals: 6,
+    rawSupply: holder.currentMintSupplyRaw,
+    baseAuthorities: { mintAuthority: { status: "unset", address: null }, freezeAuthority: { status: "unset", address: null } },
+  };
+  const roles = deriveSolanaAddressRoleEvidenceV2(resolution, record, {
+    status: "available", snapshot: normalizeMarketSnapshot("solana", MINT, [], FETCHED_AT),
+  });
+  const assessment = assessSolanaHolderExclusionsV2({ holderSnapshot: record, addressRoleEvidence: roles });
+  const population = deriveSolanaNotExcludedOwnerAuthorityPopulationV2(record, assessment);
+  return { holder, record, assessment, population };
 }
 
 test("valid current-policy evidence produces separate supply and observed-population metrics", () => {
@@ -141,6 +173,68 @@ test("valid current-policy evidence produces separate supply and observed-popula
   assert.equal(result.population.notExcludedSubjectCount, 4);
   assert.equal(result.notExcludedTopNCurrentMintSupplyShare.status, "available");
   assert.equal(result.notExcludedObservedPopulationTopNShare.status, "available");
+});
+
+test("V2 complete metrics equal V1 metrics for identical observations", () => {
+  const holder = rawHolder([{ seed: 1, balanceRaw: "50" }, { seed: 2, balanceRaw: "30" }], "100");
+  const population = evidence(holder.rawOwnerAuthorities.map((row) => ({ subjectAddress: row.ownerAddress, balanceRaw: row.balanceRaw })), { supply: "100" });
+  const v1 = deriveSolanaNotExcludedOwnerAuthorityConcentration(population);
+  const v2 = deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(v2Pipeline([{ seed: 1, balanceRaw: "50" }, { seed: 2, balanceRaw: "30" }], { supply: "100" }).population);
+  assert.deepEqual(v2.notExcludedTopNCurrentMintSupplyShare, v1.notExcludedTopNCurrentMintSupplyShare);
+  assert.deepEqual(v2.notExcludedObservedPopulationTopNShare, v1.notExcludedObservedPopulationTopNShare);
+});
+
+test("partial V2 enumeration withholds global Top-N numerator but keeps observed-population share partial", () => {
+  const result = deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(v2Pipeline(
+    [{ seed: 1, balanceRaw: "50" }, { seed: 2, balanceRaw: "30" }], { supply: "100", partial: true },
+  ).population);
+  assert.deepEqual([result.notExcludedTopNCurrentMintSupplyShare.status, result.notExcludedTopNCurrentMintSupplyShare.reason], ["unavailable", "enumeration_incomplete"]);
+  assert.deepEqual([result.notExcludedTopNCurrentMintSupplyShare.top1.numeratorRaw, result.notExcludedTopNCurrentMintSupplyShare.top1.percentage], [null, null]);
+  assert.equal(result.notExcludedObservedPopulationTopNShare.status, "available");
+  assert.equal(result.notExcludedObservedPopulationTopNShare.completeness, "partial");
+  assert.deepEqual(result.notExcludedObservedPopulationTopNShare.partialReasons, ["enumeration_incomplete"]);
+  assert.equal(result.notExcludedObservedPopulationTopNShare.top1.percentage, "62.500000");
+});
+
+test("V2 Metric B orders simultaneous enumeration, extension, and supply reasons deterministically", () => {
+  const result = deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(v2Pipeline(
+    [{ seed: 1, balanceRaw: "12" }, { seed: 2, balanceRaw: "10" }],
+    { supply: "1", partial: true, mintExtensionTypes: [1] },
+  ).population);
+  assert.deepEqual(result.notExcludedObservedPopulationTopNShare.partialReasons,
+    ["enumeration_incomplete", "unsupported_balance_affecting_extension", "supply_inconsistency"]);
+  assert.deepEqual(result.notExcludedTopNCurrentMintSupplyShare.top1, {
+    topN: 1, numeratorRaw: null, percentage: null,
+  });
+});
+
+test("V2 complete enumeration with partial amount coverage remains partial and preserves exact Metric A behavior", () => {
+  const result = deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(v2Pipeline(
+    [{ seed: 1, balanceRaw: "50" }, { seed: 2, balanceRaw: "30" }],
+    { supply: "100", mintExtensionTypes: [1] },
+  ).population);
+  assert.deepEqual([result.notExcludedTopNCurrentMintSupplyShare.status, result.notExcludedTopNCurrentMintSupplyShare.reason], ["unavailable", "partial_amount_coverage"]);
+  assert.equal(result.notExcludedTopNCurrentMintSupplyShare.top1.numeratorRaw, "50");
+  assert.equal(result.notExcludedObservedPopulationTopNShare.completeness, "partial");
+  assert.deepEqual(result.notExcludedObservedPopulationTopNShare.partialReasons, ["unsupported_balance_affecting_extension"]);
+});
+
+test("V2 rejects zero observed denominator as available and rejects malformed cross-stage provenance", () => {
+  const zero = v2Pipeline([], { supply: "100", partial: true }).population;
+  const result = deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(zero);
+  assert.equal(result.notExcludedObservedPopulationTopNShare.status, "unavailable");
+  const bad = structuredClone(zero);
+  bad.source.exclusionAssessmentSchemaVersion = "solana-holder-exclusion-assessment-v1";
+  assert.throws(() => deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(bad));
+});
+
+test("V2 concentration does not mutate population input and its result is detached", () => {
+  const input = v2Pipeline([{ seed: 1, balanceRaw: "50" }, { seed: 2, balanceRaw: "30" }], { supply: "100", partial: true }).population;
+  const before = structuredClone(input);
+  const result = deriveSolanaNotExcludedOwnerAuthorityConcentrationV2(input);
+  assert.deepEqual(input, before);
+  result.source.amountCoverage.unsupportedExtensionTypes.push(42);
+  assert.deepEqual(input, before);
 });
 
 test("Metric A equals raw concentration under current policy while Metric B uses the observed denominator", () => {

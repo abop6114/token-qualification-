@@ -5,6 +5,8 @@ import type {
   SolanaDexPoolAddressRoleFinding,
 } from "./solanaAddressRoleEvidence";
 import type { SolanaHolderStructure } from "./holders";
+import type { SolanaHolderSnapshotAcquisitionV2, SolanaHolderSnapshotRecordV2 } from "./solanaHolderSnapshot";
+import type { SolanaAddressRoleEvidenceV2 } from "./solanaAddressRoleEvidence";
 
 export type SolanaExclusionDecision = "exclude" | "retain" | "unresolved";
 export type SolanaExclusionEvidenceSufficiency = "sufficient" | "insufficient" | "conflicting";
@@ -78,3 +80,37 @@ export type SolanaHolderExclusionAssessmentInput = {
 };
 
 export type SolanaHolderExclusionRuleId = SolanaAddressRoleId;
+
+export interface SolanaHolderExclusionAssessmentV2 {
+  schemaVersion: "solana-holder-exclusion-assessment-v2";
+  chain: "solana";
+  mintAddress: string;
+  policyVersion: "solana-address-exclusion-policy-v1";
+  sourceEvidence: {
+    holderSnapshotSchemaVersion: "solana-holder-snapshot-record-v2";
+    holderSnapshotId: string;
+    holderFetchedAt: string;
+    holderAcquisition: SolanaHolderSnapshotAcquisitionV2;
+    holderEnumeration: {
+      completeness: "complete" | "partial";
+      slotConsistency: "not_guaranteed";
+      pageCount: number;
+      contextSlots: readonly number[];
+    };
+    holderAmountCoverage: SolanaHolderSnapshotRecordV2["snapshot"]["amountCoverage"];
+    currentMintSupplyRaw: string;
+    supplyDifferenceRaw: string;
+    addressRoleEvidenceSchemaVersion: SolanaAddressRoleEvidenceV2["schemaVersion"];
+    baseMintAuthoritySource: SolanaAddressRoleEvidenceV2["baseMintAuthoritySource"];
+    baseFreezeAuthoritySource: SolanaAddressRoleEvidenceV2["baseFreezeAuthoritySource"];
+    marketSource: SolanaAddressRoleEvidenceV2["marketSource"];
+  };
+  /** The frame is exactly the observed positive owner-authority rows; partial enumeration may omit subjects. */
+  subjects: SolanaHolderExclusionAssessment["subjects"];
+  summary: SolanaHolderExclusionAssessment["summary"];
+}
+
+export type SolanaHolderExclusionAssessmentInputV2 = {
+  holderSnapshot: SolanaHolderSnapshotRecordV2;
+  addressRoleEvidence: SolanaAddressRoleEvidenceV2;
+};

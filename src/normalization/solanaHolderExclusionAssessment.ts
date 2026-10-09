@@ -1,4 +1,6 @@
 import type { SolanaHolderStructure } from "../types/holders";
+import type { SolanaHolderSnapshotRecordV2 } from "../types/solanaHolderSnapshot";
+import type { SolanaAddressRoleEvidenceV2, SolanaAuthorityRoleSourceV2 } from "../types/solanaAddressRoleEvidence";
 import type {
   SolanaAddressRoleEvidence,
   SolanaAddressRoleMarketSource,
@@ -12,7 +14,10 @@ import type {
   SolanaExclusionDecision,
   SolanaHolderExclusionAssessment,
   SolanaHolderExclusionAssessmentInput,
+  SolanaHolderExclusionAssessmentV2,
+  SolanaHolderExclusionAssessmentInputV2,
 } from "../types/solanaHolderExclusionAssessment";
+import { validateSolanaHolderSnapshotRecordV2 } from "./solanaHolderSnapshotComparison";
 import { decodeSolanaPublicKey, encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 
 export const SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION = "solana-address-exclusion-policy-v1" as const;
@@ -34,6 +39,22 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isNonNegativeSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function sameArray(left: unknown, right: unknown): boolean {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function sameEnumeration(left: unknown, right: unknown): boolean {
+  return isObject(left) && isObject(right) && left.completeness === right.completeness
+    && left.slotConsistency === right.slotConsistency && left.pageCount === right.pageCount
+    && sameArray(left.contextSlots, right.contextSlots);
+}
+
+function sameCoverage(left: unknown, right: unknown): boolean {
+  return isObject(left) && isObject(right) && left.state === right.state && left.reason === right.reason
+    && sameArray(left.unsupportedExtensionTypes, right.unsupportedExtensionTypes);
 }
 
 function canonicalAddress(value: unknown): value is string {
@@ -410,5 +431,101 @@ export function assessSolanaHolderExclusions(
       retainCount: subjects.filter((subject) => subject.decision === "retain").length,
       unresolvedCount: subjects.filter((subject) => subject.decision === "unresolved").length,
     },
+  };
+}
+
+function v2AuthorityExpected(source: unknown, snapshot: SolanaHolderSnapshotRecordV2["snapshot"], addresses: ReadonlySet<string>): source is SolanaAuthorityRoleSourceV2 {
+  if (!isObject(source) || !isObject(source.sourceObservation) || source.sourceObservation.evidence !== "solana_mint_resolution"
+    || source.sourceObservation.fetchedAt !== null || source.sourceObservation.contextSlot !== null
+    || source.basis !== "solana_mint_resolution_base_field") return false;
+  const exactKeys = (keys: string[]) => Object.keys(source).length === keys.length && keys.every((key) => Object.hasOwn(source, key));
+  const observation = source.sourceObservation as Record<string, unknown>;
+  if (Object.keys(observation).length !== 3
+    || !["evidence", "fetchedAt", "contextSlot"].every((key) => Object.hasOwn(observation, key))) return false;
+  if (source.status === "unset") return exactKeys(["status", "address", "holderPopulationRelation", "basis", "sourceObservation"])
+    && source.address === null && source.holderPopulationRelation === "not_applicable";
+  if (source.status !== "set" || !canonicalAddress(source.address)) return false;
+  if (addresses.has(source.address)) return exactKeys(["status", "address", "holderPopulationRelation", "basis", "sourceObservation"])
+    && source.holderPopulationRelation === "observed_positive";
+  let reason: "enumeration_incomplete" | "amount_coverage_partial" | "supply_inconsistency" | null = null;
+  if (snapshot.enumeration.completeness === "partial") reason = "enumeration_incomplete";
+  else if (snapshot.amountCoverage.reason === "supply_inconsistency" || BigInt(snapshot.supplyDifferenceRaw) < 0n) reason = "supply_inconsistency";
+  else if (snapshot.amountCoverage.state === "partial") reason = "amount_coverage_partial";
+  return reason === null
+    ? exactKeys(["status", "address", "holderPopulationRelation", "basis", "sourceObservation"]) && source.holderPopulationRelation === "not_observed_positive"
+    : exactKeys(["status", "address", "holderPopulationRelation", "reason", "basis", "sourceObservation"])
+      && source.holderPopulationRelation === "unknown" && source.reason === reason;
+}
+
+function sameAcquisition(left: unknown, right: unknown): boolean {
+  return isObject(left) && isObject(right)
+    && Object.keys(left).length === 4 && Object.keys(right).length === 4
+    && left.completeness === right.completeness && left.stopReason === right.stopReason
+    && left.configuredMaxPages === right.configuredMaxPages && left.requestedPageSize === right.requestedPageSize;
+}
+
+/** Applies the unchanged V1 policy to observed rows while retaining V2 partial-population provenance. */
+export function assessSolanaHolderExclusionsV2(input: SolanaHolderExclusionAssessmentInputV2): SolanaHolderExclusionAssessmentV2 {
+  const failV2 = (message: string): never => fail(message);
+  try { validateSolanaHolderSnapshotRecordV2(input?.holderSnapshot); } catch { failV2("V2 holder snapshot record is invalid."); }
+  const snapshot = input.holderSnapshot.snapshot;
+  const role = input.addressRoleEvidence as unknown;
+  if (!isObject(role) || role.schemaVersion !== "solana-address-role-evidence-v2" || role.chain !== "solana"
+    || role.mintAddress !== snapshot.mintAddress || !isObject(role.holderSource)
+    || role.holderSource.evidence !== "solana_holder_snapshot_record_v2"
+    || role.holderSource.snapshotSchemaVersion !== input.holderSnapshot.schemaVersion
+    || role.holderSource.snapshotId !== input.holderSnapshot.snapshotId
+    || role.holderSource.fetchedAt !== snapshot.fetchedAt || role.holderSource.tokenProgram !== snapshot.tokenProgram
+    || role.holderSource.decimals !== snapshot.decimals || role.holderSource.currentMintSupplyRaw !== snapshot.currentMintSupplyRaw
+    || role.holderSource.supplyDifferenceRaw !== snapshot.supplyDifferenceRaw
+    || role.holderSource.observedPositiveOwnerAuthorityCount !== snapshot.rawOwnerCount
+    || !sameEnumeration(role.holderSource.enumeration, snapshot.enumeration)
+    || !sameCoverage(role.holderSource.amountCoverage, snapshot.amountCoverage)
+    || !sameAcquisition(role.holderSource.acquisition, input.holderSnapshot.acquisition)
+    || !v2AuthorityExpected(role.baseMintAuthoritySource, snapshot, new Set(snapshot.rawOwnerAuthorities.map((row) => row.ownerAddress)))
+    || !v2AuthorityExpected(role.baseFreezeAuthoritySource, snapshot, new Set(snapshot.rawOwnerAuthorities.map((row) => row.ownerAddress)))
+    || !Array.isArray(role.ownerAuthorities)) failV2("V2 address-role evidence provenance or structure is invalid.");
+
+  const roleRecord = role as Record<string, unknown>;
+  // Reuse the established row-level rule/finding validator against a validation-only V1 projection.
+  // This projection is never returned and does not change the V2 partial absence state.
+  const addresses = new Set(snapshot.rawOwnerAuthorities.map((row) => row.ownerAddress));
+  const sourceToV1 = (source: Record<string, unknown>) => ({ ...source, holderPopulationRelation: source.holderPopulationRelation === "not_applicable" ? "not_applicable" : source.holderPopulationRelation === "observed_positive" ? "observed_positive" : "not_observed_positive" });
+  const roleProjection = {
+    schemaVersion: "solana-address-role-evidence-v1", chain: "solana", mintAddress: snapshot.mintAddress,
+    holderSource: { evidence: "solana_holder_structure", fetchedAt: snapshot.fetchedAt, enumeration: snapshot.enumeration, amountCoverage: snapshot.amountCoverage, observedPositiveOwnerAuthorityCount: snapshot.rawOwnerCount },
+    baseMintAuthoritySource: sourceToV1(roleRecord.baseMintAuthoritySource as Record<string, unknown>),
+    baseFreezeAuthoritySource: sourceToV1(roleRecord.baseFreezeAuthoritySource as Record<string, unknown>),
+    marketSource: roleRecord.marketSource,
+    ownerAuthorities: roleRecord.ownerAuthorities,
+  };
+  validateRoleEvidence(roleProjection, snapshot as unknown as SolanaHolderStructure);
+  const v2RoleRows = roleRecord.ownerAuthorities as SolanaAddressRoleEvidenceV2["ownerAuthorities"];
+  if (v2RoleRows.length !== addresses.size) failV2("V2 address-role subject frame is incomplete.");
+
+  const holderRows = new Map(snapshot.rawOwnerAuthorities.map((row) => [row.ownerAddress, row]));
+  const roleRows = new Map(v2RoleRows.map((row) => [row.ownerAuthorityAddress, row]));
+  if (roleRows.size !== holderRows.size || [...holderRows.keys()].some((address) => !roleRows.has(address))) failV2("V2 address-role subjects do not match observed snapshot rows.");
+  const subjects = [...holderRows.keys()].sort().map((subjectAddress) => {
+    const findings = roleRows.get(subjectAddress)!.findings;
+    const ruleAssessments: [SolanaAuthorityExclusionRuleAssessment, SolanaAuthorityExclusionRuleAssessment, SolanaDexPoolExclusionRuleAssessment] = [authorityAssessment(findings[0]), authorityAssessment(findings[1]), dexAssessment(findings[2])];
+    return { subjectType: "positive_owner_authority" as const, subjectAddress, balanceRaw: holderRows.get(subjectAddress)!.balanceRaw,
+      decision: aggregateDecision(ruleAssessments.map((item) => item.decision)), ruleAssessments };
+  });
+  return {
+    schemaVersion: "solana-holder-exclusion-assessment-v2", chain: "solana", mintAddress: snapshot.mintAddress,
+    policyVersion: SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION,
+    sourceEvidence: {
+      holderSnapshotSchemaVersion: input.holderSnapshot.schemaVersion, holderSnapshotId: input.holderSnapshot.snapshotId,
+      holderFetchedAt: snapshot.fetchedAt, holderAcquisition: structuredClone(input.holderSnapshot.acquisition),
+      holderEnumeration: structuredClone(snapshot.enumeration), holderAmountCoverage: structuredClone(snapshot.amountCoverage),
+      currentMintSupplyRaw: snapshot.currentMintSupplyRaw, supplyDifferenceRaw: snapshot.supplyDifferenceRaw,
+      addressRoleEvidenceSchemaVersion: "solana-address-role-evidence-v2",
+      baseMintAuthoritySource: structuredClone(roleRecord.baseMintAuthoritySource as SolanaAddressRoleEvidenceV2["baseMintAuthoritySource"]),
+      baseFreezeAuthoritySource: structuredClone(roleRecord.baseFreezeAuthoritySource as SolanaAddressRoleEvidenceV2["baseFreezeAuthoritySource"]),
+      marketSource: structuredClone(roleRecord.marketSource as SolanaAddressRoleEvidenceV2["marketSource"]),
+    },
+    subjects,
+    summary: { subjectCount: subjects.length, excludeCount: 0, retainCount: subjects.filter((row) => row.decision === "retain").length, unresolvedCount: subjects.filter((row) => row.decision === "unresolved").length },
   };
 }

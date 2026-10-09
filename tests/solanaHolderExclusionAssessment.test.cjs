@@ -1,6 +1,8 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { assessSolanaHolderExclusions, SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION } = require("../dist/normalization/solanaHolderExclusionAssessment.js");
+const { assessSolanaHolderExclusionsV2 } = require("../dist/normalization/solanaHolderExclusionAssessment.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
 const { deriveSolanaAddressRoleEvidence } = require("../dist/normalization/solanaAddressRoleEvidence.js");
 const { normalizeMarketSnapshot } = require("../dist/normalization/marketSnapshot.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
@@ -91,6 +93,52 @@ function assess({ holder = holderStructure(), evidence = roleEvidence({ holder }
   return assessSolanaHolderExclusions({ holderStructure: holder, addressRoleEvidence: evidence });
 }
 
+function snapshotV2(holder, partial = false) {
+  const value = structuredClone(holder);
+  const total = value.rawOwnerAuthorities.reduce((sum, row) => sum + BigInt(row.balanceRaw), 0n);
+  value.observedPositiveBalanceRaw = total.toString();
+  value.supplyDifferenceRaw = (BigInt(value.currentMintSupplyRaw) - total).toString();
+  value.tokenAccountStateSummary.initialized.observedBalanceRaw = total.toString();
+  value.tokenAccountStateSummary.initialized.positiveBalanceTokenAccountCount = value.rawOwnerAuthorities.length;
+  for (const n of [1, 5, 10, 20]) {
+    const numerator = value.rawOwnerAuthorities.slice(0, n).reduce((sum, row) => sum + BigInt(row.balanceRaw), 0n);
+    const scaled = (numerator * 100n * 1_000_000n + BigInt(value.currentMintSupplyRaw) / 2n) / BigInt(value.currentMintSupplyRaw);
+    value.concentration["top" + n] = {
+      status: "available", topN: n, numeratorRaw: numerator.toString(), denominatorRaw: value.currentMintSupplyRaw,
+      denominatorBasis: "current_mint_supply",
+      percentage: (scaled / 1_000_000n).toString() + "." + (scaled % 1_000_000n).toString().padStart(6, "0"),
+    };
+  }
+  if (partial) {
+    value.enumeration.completeness = "partial";
+    value.concentration = Object.fromEntries([1, 5, 10, 20].map((n) => ["top" + n, {
+      status: "unavailable", topN: n, numeratorRaw: null, denominatorRaw: value.currentMintSupplyRaw,
+      denominatorBasis: "current_mint_supply", percentage: null, reason: "enumeration_incomplete",
+    }]));
+    value.acquisition = { stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000 };
+    return createSolanaHolderSnapshotRecordV2(value);
+  }
+  return createSolanaHolderSnapshotRecordV2(value, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+}
+
+function assessV2(holder, partial = false, options = {}) {
+  const record = snapshotV2(holder, partial);
+  const authority = options.authority ?? MINT_AUTHORITY;
+  const resolution = {
+    exists: true, isMint: true, mintAddress: holder.mintAddress, tokenProgram: holder.tokenProgram,
+    decimals: holder.decimals, rawSupply: holder.currentMintSupplyRaw,
+    baseAuthorities: {
+      mintAuthority: authority === null ? { status: "unset", address: null } : { status: "set", address: authority },
+      freezeAuthority: { status: "unset", address: null },
+    },
+  };
+  const market = normalizeMarketSnapshot("solana", holder.mintAddress, [], MARKET_AT);
+  const roles = require("../dist/normalization/solanaAddressRoleEvidence.js").deriveSolanaAddressRoleEvidenceV2(
+    resolution, record, { status: "available", snapshot: market },
+  );
+  return assessSolanaHolderExclusionsV2({ holderSnapshot: record, addressRoleEvidence: roles });
+}
+
 function subject(result, address) {
   const found = result.subjects.find((row) => row.subjectAddress === address);
   assert.ok(found, `missing assessed subject ${address}`);
@@ -102,6 +150,63 @@ test("the v1 policy produces zero automatic exclusions", () => {
   assert.equal(result.policyVersion, SOLANA_ADDRESS_EXCLUSION_POLICY_VERSION);
   assert.equal(result.summary.excludeCount, 0);
   assert.equal(result.subjects.some((row) => row.decision === "exclude"), false);
+});
+
+test("V2 complete assessments preserve V1 decisions and bind the immutable snapshot", () => {
+  const holder = holderStructure();
+  const snapshot = snapshotV2(holder);
+  const legacy = assess({ holder });
+  const current = assessV2(holder);
+  assert.equal(current.schemaVersion, "solana-holder-exclusion-assessment-v2");
+  assert.deepEqual(current.subjects.map((row) => [row.subjectAddress, row.balanceRaw, row.decision]),
+    legacy.subjects.map((row) => [row.subjectAddress, row.balanceRaw, row.decision]));
+  assert.equal(current.sourceEvidence.holderSnapshotId, snapshot.snapshotId);
+  assert.equal(current.summary.excludeCount, 0);
+});
+
+test("V2 partial observed clean rows retain sufficient row-level decisions without expanding the subject frame", () => {
+  const holder = holderStructure([OWNER_B, OWNER_C]);
+  const result = assessV2(holder, true);
+  assert.equal(result.sourceEvidence.holderEnumeration.completeness, "partial");
+  assert.deepEqual(result.subjects.map((row) => row.subjectAddress), [OWNER_B, OWNER_C].sort());
+  assert.ok(result.subjects.every((row) => row.decision === "retain"));
+  assert.ok(result.subjects.every((row) => row.ruleAssessments.every((rule) => rule.evidenceSufficiency === "sufficient")));
+});
+
+test("V2 partial observed authority matches remain unresolved under the unchanged policy", () => {
+  const holder = holderStructure([OWNER_A]);
+  const result = assessV2(holder, true, { authority: OWNER_A });
+  assert.equal(subject(result, OWNER_A).decision, "unresolved");
+  assert.equal(result.summary.excludeCount, 0);
+});
+
+test("V2 rejects snapshot ID and role-subject provenance mismatches", () => {
+  const holder = holderStructure();
+  const record = snapshotV2(holder);
+  const roles = require("../dist/normalization/solanaAddressRoleEvidence.js").deriveSolanaAddressRoleEvidenceV2(
+    mintResolution({ mintAuthority: null, freezeAuthority: null }), record,
+    { status: "available", snapshot: normalizeMarketSnapshot("solana", MINT, [], MARKET_AT) },
+  );
+  assert.throws(() => assessSolanaHolderExclusionsV2({ holderSnapshot: { ...record, snapshotId: "sha256:" + "0".repeat(64) }, addressRoleEvidence: roles }));
+  assert.throws(() => assessSolanaHolderExclusionsV2({ holderSnapshot: record, addressRoleEvidence: { ...roles, ownerAuthorities: [] } }));
+  assert.throws(() => assessSolanaHolderExclusionsV2({
+    holderSnapshot: record,
+    addressRoleEvidence: { ...roles, holderSource: { ...roles.holderSource, currentMintSupplyRaw: "999" } },
+  }));
+});
+
+test("V2 assessment inputs and results are mutation-independent", () => {
+  const holder = holderStructure();
+  const record = snapshotV2(holder);
+  const resolution = mintResolution();
+  const roles = require("../dist/normalization/solanaAddressRoleEvidence.js").deriveSolanaAddressRoleEvidenceV2(
+    resolution, record, { status: "available", snapshot: normalizeMarketSnapshot("solana", MINT, [], MARKET_AT) },
+  );
+  const rolesBefore = structuredClone(roles);
+  const result = assessSolanaHolderExclusionsV2({ holderSnapshot: record, addressRoleEvidence: roles });
+  assert.deepEqual(roles, rolesBefore);
+  roles.ownerAuthorities.length = 0;
+  assert.equal(result.subjects.length, record.snapshot.rawOwnerCount);
 });
 
 test("a mint-authority match is unresolved with insufficient evidence", () => {
