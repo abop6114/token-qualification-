@@ -7,9 +7,9 @@
 ## 2. Current checkpoint
 
 - Branch: `main`
-- **Implementation checkpoint: `4938c64` — `feat: propagate partial Solana historical evidence`.** `HEAD` and `origin/main` are synchronized at this checkpoint.
-- The repository was clean before this documentation refresh. The implementation checkpoint is `4938c64`; this documentation change is not part of that checkpoint.
-- Current full-suite result at the implementation checkpoint: **525 tests passed, 0 failed**. `npm test` includes the TypeScript build.
+- **Implementation checkpoint: `7b10660` — `feat: add Token-2022 mint extension inventory`.** `HEAD` and `origin/main` are synchronized at this checkpoint.
+- The repository was clean before this documentation refresh. The implementation checkpoint is `7b10660`; this documentation change is separate and does not alter that checkpoint.
+- Full-suite result reported at the implementation checkpoint: **537 tests passed, 0 failed**; `npm run build` and `git diff --check` passed. These results are recorded from that checkpoint and were not rerun during this documentation task.
 - The project began as a Solana-first CLI/JSON prototype. Committed Base/Ethereum work is an evidence-feasibility extension; it is not EVM CLI/product integration.
 
 ## 3. Product objective
@@ -39,8 +39,15 @@ The governing rule is: **“Standardize economic questions and evidence semantic
 The committed Solana path includes:
 
 - Solana public-key syntax validation and deterministic mint resolution through Helius account evidence.
-- Classic SPL Token and Token-2022 mint-base parsing, including exact decimals/raw supply and initialized-mint validation. Token-2022 extension parsing is limited to structural mint/account disambiguation and known balance-affecting extension coverage.
+- Classic SPL Token and Token-2022 mint-base parsing, including exact decimals/raw supply and initialized-mint validation. Token-2022 parsing supports structural mint/account disambiguation, known balance-affecting extension coverage, and the presence-only mint-extension inventory described below.
 - Base `mintAuthority` and `freezeAuthority` COption evidence. These are base-layout facts, not complete Token-2022 authority/security coverage.
+- `solana-token-2022-mint-extension-inventory-v1`: deterministic, Solana-specific chain-native presence evidence derived locally from already acquired mint account bytes, with zero additional provider requests. Inventory entries contain `extensionTypeId`, pinned `extensionName`, and TLV-declared `payloadLength`; successful entries are ordered by ascending extension ID. A Token-2022 mint with no supported extensions is `available` with `extensions: []`; a classic SPL mint is `not_applicable`. Duplicate Token-2022 mint extension IDs are `malformed` and noncanonical under the TQE inventory rule; this does not claim that SPL's generic TLV iterator rejects duplicates.
+- The inventory mapping is pinned to official `solana-program/token-2022` commit `8867f751c0f69367ba03af4f85510b5611989491`, file `interface/src/extension/mod.rs`. This is the authoritative mapping selected by TQE, not a repository dependency. IDs 1–28 match TQE's existing recognized Mint/Account partition.
+- Inventory V1 establishes only supported extension identity, Mint context, TLV framing, declared payload bounds, and structurally parsed presence/absence. It does not establish extension-specific payload semantic validity, authority state, safety, risk, transfer restrictions, mutability, exploitability, holder quality, or exclusion eligibility. Those require later deterministic extension-specific evidence.
+- Unknown Token-2022 mint extension IDs remain fail-closed under existing TQE supported-mint behavior: they do not produce successful inventory entries. This means TQE does not currently establish them as supported mint extensions; it is not proof that an unknown ID is invalid on-chain. Token-account unknown-extension behavior is unchanged.
+- The inventory records no fabricated fetch time or RPC context slot. The current raw mint path does not carry those fields through this evidence contract. The inventory is an internal deterministic evidence module and is not exposed through the normal CLI/public report; no public security reporting is implied.
+- This is **C — chain-specific** evidence, not a universal token-extension abstraction. It may later inform a shared economic/security question about privileged controls or unusual token mechanics, while Token-2022 mechanics remain Solana-specific.
+- No provider or Helius request and no acquisition fanout were added; this is local parsing only, with negligible incremental runtime/provider cost. No provider pricing assumption is introduced.
 - DEX Screener adapter and normalized per-pool market observations; deterministic primary-pool ordering; conservative base/quote metric orientation. Token age and lifecycle remain unknown unless directly supported.
 - Helius token-account enumeration, account decoding, owner-authority aggregation, holder structure, supply-based top-1/5/10/20 concentration, and token-account state summary.
 - Exact owner-authority balance distribution: min/max, nearest-rank quantiles, repeated exact-balance evidence, and cumulative ascending-balance profiles.
@@ -107,6 +114,8 @@ Partial amount coverage and supply inconsistency—including a negative supply d
 
 These are evidence primitives, not completed holder-quality classifications, qualification scoring, or AI interpretation.
 
+The Token-2022 mint-extension inventory is a separate chain-native presence-only evidence primitive. It did not change holder exclusions, concentration, Step 5, historical evidence, scoring, or AI interpretation. The existing `getSolanaMintExtensionTypes()` behavior remains available as a compatibility projection over the shared structural parser.
+
 **Step 5B-3 — not-excluded owner-authority concentration evidence** (`20ee0e5 feat: add deterministic Solana not-excluded concentration evidence`): `SolanaNotExcludedOwnerAuthorityConcentrationEvidence` consumes Step 5B-2 evidence only and makes no provider calls. Its pipeline is:
 
 `SolanaHolderSnapshotRecord` / holder evidence → `SolanaAddressRoleEvidence` → `SolanaHolderExclusionAssessment` → `SolanaNotExcludedOwnerAuthorityPopulationEvidence` → `SolanaNotExcludedOwnerAuthorityConcentrationEvidence`.
@@ -165,7 +174,7 @@ These are non-blocking design observations, not requests for immediate refactori
 
 ## 11. Validation and testing posture
 
-Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At implementation checkpoint `4938c64`, the verified full suite is **525 passing tests**; `npm test` also runs the TypeScript build.
+Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At implementation checkpoint `7b10660`, the reported full suite is **537 passing tests**; `npm test` also runs the TypeScript build. These checkpoint results were not rerun during this documentation task.
 
 ## 12. Cost and operating constraints
 
@@ -183,7 +192,7 @@ Raw token-account lists, owner-authority candidate lists, provider pages, pagina
 
 The following are not current product conclusions or implemented classifications:
 
-- Token-2022 extension-specific authority/control analysis; authority revocation/change history; multisig or control interpretation.
+- Token-2022 extension-specific payload/control decoding; extension authority interpretation; authority revocation/change history; multisig or control interpretation; transfer restriction evidence; privileged-control conclusions; security scoring. The V1 inventory establishes presence and framing only.
 - Rules that actually emit balance exclusions and adjusted concentration. Step 5B-2 provides a not-excluded observed population; because current v1 policy emits no exclusions, it currently equals the raw observed population.
 - A retain-only concentration view remains deferred; Step 5B-3 provides the two not-excluded views and does not add a separate retain-only metric.
 - EVM equivalent not-excluded concentration evidence and a global normalized concentration interface remain deferred; no Step 5B-3 contract or cross-chain concentration equivalence is implied.
@@ -207,7 +216,7 @@ Cash Cat, Super Cat, and SANTA remain reference/validation cases only; they are 
 
 **Step 5B-3 — not-excluded concentration evidence: IMPLEMENTED at `20ee0e5`.** It consumes Step 5B-2 evidence and reports separate current-mint-supply and observed-not-excluded-population Top-N views under the availability and completeness semantics recorded above. It makes no provider calls, does not mutate raw concentration, and does not change the exclusion policy.
 
-Bounded partial-evidence propagation is complete through the currently implemented Solana holder and historical evidence path. Select the next major implementation priority only after reviewing the updated capability gaps and project objectives; this handoff does not invent or approve a new phase. The existence of concentration evidence does not authorize scoring or qualification integration. Future work remains subject to reconnaissance, evidence review, bounded implementation, and explicit methodology approval where required.
+Bounded partial-evidence propagation is complete through the currently implemented Solana holder and historical evidence path. The next high-leverage candidate is **bounded transaction enrichment over already-selected historical signatures**, to establish transaction-grounded structural evidence for later participation, relationship, and trading analysis. This is a roadmap candidate, not approved implementation work. A focused design/reconnaissance phase must first examine provider semantics and bounded fanout/cost decisions. The initial enrichment must not classify swaps, buys, sells, traders, organic/artificial behavior, or wallet quality. Future work remains subject to evidence review, bounded implementation, and explicit methodology approval where required.
 
 ## 16. Development workflow
 
