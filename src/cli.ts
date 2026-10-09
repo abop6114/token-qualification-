@@ -49,14 +49,33 @@ async function main(): Promise<void> {
       const market = normalizeMarketSnapshot("solana", mintAddress, providerMarkets);
       if (account === null) throw new Error("Resolved mint account evidence is missing.");
       const mintExtensionTypes = getSolanaMintExtensionTypes(account, resolution.tokenProgram);
-      const holderPages = await getSolanaTokenAccountPages(mintAddress, resolution.tokenProgram);
+      const holderAcquisition = await getSolanaTokenAccountPages(mintAddress, resolution.tokenProgram);
+      const { mintAddress: resolvedMintAddress, ...mintEvidence } = resolution;
+      if (holderAcquisition.status === "unavailable") {
+        console.log(JSON.stringify({
+          chain: "solana",
+          mintAddress: resolvedMintAddress,
+          status,
+          ...mintEvidence,
+          market,
+          holderAcquisition: {
+            status: "unavailable",
+            reason: holderAcquisition.reason,
+            configuredMaxPages: holderAcquisition.configuredMaxPages,
+            requestedPageSize: holderAcquisition.requestedPageSize,
+            acceptedPageCount: 0,
+            contextSlots: [],
+          },
+        }));
+        return;
+      }
       const holderStructure = normalizeSolanaHolderStructure({
         mintAddress,
         tokenProgram: resolution.tokenProgram,
         decimals: resolution.decimals,
         currentMintSupplyRaw: resolution.rawSupply,
         mintExtensionTypes,
-        pages: holderPages,
+        acquisition: holderAcquisition,
       });
       const ownerAuthorityBalanceDistribution = normalizeOwnerAuthorityBalanceDistribution({
         chain: holderStructure.chain,
@@ -69,7 +88,28 @@ async function main(): Promise<void> {
         rawOwnerCount: holderStructure.rawOwnerCount,
         rawOwnerAuthorities: holderStructure.rawOwnerAuthorities,
       });
-      const { mintAddress: resolvedMintAddress, ...mintEvidence } = resolution;
+      if (holderStructure.enumeration.completeness === "partial") {
+        const { rawOwnerAuthorities: _privateOwnerAuthorities, ...publicPartialHolderStructure } = holderStructure;
+        console.log(JSON.stringify({
+          chain: "solana",
+          mintAddress: resolvedMintAddress,
+          status,
+          ...mintEvidence,
+          market,
+          holderAcquisition: {
+            status: "available",
+            completeness: "partial",
+            stopReason: holderAcquisition.stopReason,
+            configuredMaxPages: holderAcquisition.configuredMaxPages,
+            requestedPageSize: holderAcquisition.requestedPageSize,
+            acceptedPageCount: holderAcquisition.pages.length,
+            contextSlots: holderAcquisition.pages.map((page) => page.contextSlot),
+          },
+          holderStructure: publicPartialHolderStructure,
+          ownerAuthorityBalanceDistribution,
+        }));
+        return;
+      }
       console.log(JSON.stringify({ chain: "solana", mintAddress: resolvedMintAddress, status, ...mintEvidence, market, holderStructure, ownerAuthorityBalanceDistribution }));
       return;
     }

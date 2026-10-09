@@ -126,6 +126,28 @@ test("profile preserves balances above JavaScript safe integer range exactly", (
   ]);
 });
 
+test("profiles accepted observed rows exactly and preserves partial enumeration coverage", () => {
+  const result = normalize(["9007199254740993", "7"], {
+    currentSupplyRaw: "9007199254741001",
+    enumeration: {
+      completeness: "partial",
+      slotConsistency: "not_guaranteed",
+      pageCount: 1,
+      contextSlots: [123],
+    },
+  });
+  assert.equal(result.observedOwnerAuthorityCount, 2);
+  assert.equal(result.observedPositiveOwnerAuthorityBalanceRaw, "9007199254741000");
+  assert.equal(result.minimumBalanceRaw, "7");
+  assert.equal(result.maximumBalanceRaw, "9007199254740993");
+  assert.deepEqual(result.quantilesRaw, {
+    p25: "7", p50: "7", p75: "9007199254740993", p90: "9007199254740993", p99: "9007199254740993",
+  });
+  assert.equal(result.coverage.state, "partial");
+  assert.equal(result.coverage.enumerationCompleteness, "partial");
+  assert.deepEqual(result.coverage.contextSlots, [123]);
+});
+
 test("profile supports maximum u64-scale balances and cumulative sums larger than u64", () => {
   const maxU64 = "18446744073709551615";
   const result = normalize([maxU64, maxU64], { currentSupplyRaw: maxU64 });

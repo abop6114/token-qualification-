@@ -2,10 +2,12 @@ import type {
   RawSolanaTokenAccountPage,
   SolanaHolderStructure,
   HolderConcentration,
+  SolanaPartialHolderStructure,
   TokenAccountStateMetrics,
+  SolanaTokenAccountAcquisitionResult,
 } from "../types/holders";
 import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../types/solana";
-import { decodeSolanaPublicKey, encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
+import { decodeSolanaPublicKey, encodeSolanaPublicKey, isBase58Syntax, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 import { parseToken2022TokenAccountExtensionTypes } from "./token2022Extensions";
 
 const TOKEN_ACCOUNT_BASE_SIZE = 165;
@@ -45,31 +47,81 @@ function validateBase(data: Uint8Array): void {
   }
 }
 
-export interface NormalizeSolanaHolderStructureInput {
+interface NormalizeSolanaHolderStructureBaseInput {
   mintAddress: string;
   tokenProgram: TokenProgram;
   decimals: number;
   currentMintSupplyRaw: string;
   mintExtensionTypes: number[];
-  pages: RawSolanaTokenAccountPage[];
   fetchedAt?: string;
 }
 
+type AvailableAcquisition = Extract<SolanaTokenAccountAcquisitionResult, { status: "available" }>;
+
+export type NormalizeSolanaHolderStructureInput = NormalizeSolanaHolderStructureBaseInput & (
+  | { pages: RawSolanaTokenAccountPage[]; acquisition?: undefined }
+  | { acquisition: AvailableAcquisition; pages?: never }
+);
+
+type PartialHolderConcentration = SolanaPartialHolderStructure["concentration"]["top1"];
+
 export function normalizeSolanaHolderStructure(
   input: NormalizeSolanaHolderStructureInput,
-): SolanaHolderStructure {
+): SolanaHolderStructure | SolanaPartialHolderStructure {
+  const acquisition = (input as { acquisition?: SolanaTokenAccountAcquisitionResult }).acquisition;
+  if (acquisition?.status === "unavailable") {
+    throw new Error("Unavailable Solana token-account acquisition cannot be normalized as holder evidence.");
+  }
+  const pages = acquisition?.status === "available" ? acquisition.pages : (input as { pages: RawSolanaTokenAccountPage[] }).pages;
   const mintBytes = decodeSolanaPublicKey(input.mintAddress);
   if (!mintBytes) throw new Error("Resolved mint address is malformed.");
   if (!/^(0|[1-9][0-9]*)$/.test(input.currentMintSupplyRaw)) throw new Error("Resolved mint supply is malformed.");
   if (!Number.isInteger(input.decimals) || input.decimals < 0 || input.decimals > 255) throw new Error("Resolved mint decimals are malformed.");
-  if (input.pages.length === 0) throw new Error("Helius returned no holder enumeration pages.");
+  if (!Array.isArray(pages) || pages.length === 0) throw new Error("Helius returned no holder enumeration pages.");
+  if (acquisition?.status === "available") {
+    if (acquisition.configuredMaxPages !== 20 || acquisition.requestedPageSize !== 5000
+      || pages.length > acquisition.configuredMaxPages) {
+      throw new Error("Solana holder acquisition bounds are malformed.");
+    }
+    if (acquisition.completeness !== "complete" && acquisition.completeness !== "partial") {
+      throw new Error("Solana holder acquisition completeness is malformed.");
+    }
+    const partialStopReasons = new Set(["page_cap", "request_timeout", "provider_error", "malformed_response"]);
+    if (acquisition.completeness === "complete" && acquisition.stopReason !== "provider_terminated"
+      || acquisition.completeness === "partial" && !partialStopReasons.has(acquisition.stopReason)) {
+      throw new Error("Solana holder acquisition completeness contradicts its stop reason.");
+    }
+    if (acquisition.completeness === "partial"
+      && (acquisition.stopReason === "page_cap" ? pages.length !== acquisition.configuredMaxPages : pages.length >= acquisition.configuredMaxPages)) {
+      throw new Error("Solana partial holder acquisition page count contradicts its stop reason.");
+    }
+    for (const page of pages) {
+      if (!page || !Array.isArray(page.accounts) || page.accounts.length > acquisition.requestedPageSize) {
+        throw new Error("Solana holder page exceeds its requested size or is malformed.");
+      }
+    }
+    const finalCursor = pages[pages.length - 1].paginationKey;
+    if (acquisition.completeness === "complete" && finalCursor !== null
+      || acquisition.completeness === "partial" && (typeof finalCursor !== "string" || !isBase58Syntax(finalCursor))) {
+      throw new Error("Solana holder acquisition cursor contradicts its completeness.");
+    }
+  }
   const seenCursors = new Set<string>();
-  for (let index = 0; index < input.pages.length; index += 1) {
-    const cursor = input.pages[index].paginationKey;
-    if (index === input.pages.length - 1) {
-      if (cursor !== null) throw new Error("Helius holder enumeration is incomplete; final cursor is not null.");
+  for (let index = 0; index < pages.length; index += 1) {
+    const cursor = pages[index].paginationKey;
+    if (index === pages.length - 1) {
+      if (acquisition?.status === "available" && acquisition.completeness === "complete" && cursor !== null) {
+        throw new Error("Helius holder enumeration is incomplete; final cursor is not null.");
+      }
+      if (acquisition?.status !== "available" && cursor !== null) {
+        throw new Error("Helius holder enumeration is incomplete; final cursor is not null.");
+      }
+      if (acquisition?.status === "available" && acquisition.completeness === "partial"
+        && (typeof cursor !== "string" || !isBase58Syntax(cursor) || seenCursors.has(cursor))) {
+        throw new Error("Helius partial holder enumeration has an invalid or repeated final cursor.");
+      }
     } else {
-      if (typeof cursor !== "string" || cursor.length === 0 || seenCursors.has(cursor)) {
+      if (typeof cursor !== "string" || !isBase58Syntax(cursor) || seenCursors.has(cursor)) {
         throw new Error("Helius holder enumeration has an invalid or repeated pagination cursor.");
       }
       seenCursors.add(cursor);
@@ -89,7 +141,7 @@ export function normalizeSolanaHolderStructure(
   };
   const expectedProgram = SOLANA_TOKEN_PROGRAM_IDS[input.tokenProgram];
 
-  for (const page of input.pages) {
+  for (const page of pages) {
     if (!Number.isSafeInteger(page.contextSlot) || page.contextSlot < 0 || !Array.isArray(page.accounts)) {
       throw new Error("Helius returned malformed holder page context.");
     }
@@ -151,13 +203,16 @@ export function normalizeSolanaHolderStructure(
   const supplyDifference = supply - observedPositiveBalance;
   const supplyInconsistent = observedPositiveBalance > supply;
   const partial = unsupportedExtensions.size > 0 || supplyInconsistent;
-  const concentrationFor = (topN: typeof TOP_N_VALUES[number]): HolderConcentration => {
+  const isPartialEnumeration = acquisition?.status === "available" && acquisition.completeness === "partial";
+  const concentrationFor = (topN: typeof TOP_N_VALUES[number]): HolderConcentration | PartialHolderConcentration => {
     const numerator = owners.slice(0, topN).reduce((sum, owner) => sum + owner.balance, 0n);
-    if (supplyInconsistent || partial || supply === 0n) {
+    if (isPartialEnumeration || supplyInconsistent || partial || supply === 0n) {
       return {
         status: "unavailable", topN, numeratorRaw: null, denominatorRaw: input.currentMintSupplyRaw,
         denominatorBasis: "current_mint_supply", percentage: null,
-        reason: supplyInconsistent
+        reason: isPartialEnumeration
+          ? "enumeration_incomplete"
+          : supplyInconsistent
           ? "supply_inconsistency"
           : partial
             ? "unsupported_balance_affecting_extension"
@@ -183,7 +238,7 @@ export function normalizeSolanaHolderStructure(
     positiveBalanceTokenAccountCount: metrics.positiveBalanceTokenAccountCount,
     observedBalanceRaw: metrics.observedBalance.toString(),
   });
-  return {
+  const normalized = {
     chain: "solana",
     mintAddress: input.mintAddress,
     tokenProgram: input.tokenProgram,
@@ -193,10 +248,10 @@ export function normalizeSolanaHolderStructure(
     supplyDifferenceRaw: supplyDifference.toString(),
     fetchedAt,
     enumeration: {
-      completeness: "complete",
-      slotConsistency: "not_guaranteed",
-      pageCount: input.pages.length,
-      contextSlots: input.pages.map((page) => page.contextSlot),
+      completeness: isPartialEnumeration ? "partial" as const : "complete" as const,
+      slotConsistency: "not_guaranteed" as const,
+      pageCount: pages.length,
+      contextSlots: pages.map((page) => page.contextSlot),
     },
     tokenAccountCount,
     nonzeroTokenAccountCount,
@@ -219,4 +274,15 @@ export function normalizeSolanaHolderStructure(
       top1: concentrationFor(1), top5: concentrationFor(5), top10: concentrationFor(10), top20: concentrationFor(20),
     },
   };
+  if (isPartialEnumeration && acquisition?.status === "available") {
+    return {
+      ...normalized,
+      acquisition: {
+        stopReason: acquisition.stopReason,
+        configuredMaxPages: acquisition.configuredMaxPages,
+        requestedPageSize: acquisition.requestedPageSize,
+      },
+    } as SolanaPartialHolderStructure;
+  }
+  return normalized as SolanaHolderStructure;
 }

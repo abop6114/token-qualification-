@@ -204,6 +204,126 @@ test("does not report completeness when the final page still has a cursor", () =
   }), /enumeration is incomplete/);
 });
 
+test("normalizes bounded partial pages as exact observed evidence with unavailable global concentration", () => {
+  const page = { accounts: [account(1, "25")], paginationKey: "2", contextSlot: 123 };
+  const result = normalizeSolanaHolderStructure({
+    mintAddress: MINT,
+    tokenProgram: "spl-token",
+    decimals: 6,
+    currentMintSupplyRaw: "1000",
+    mintExtensionTypes: [],
+    acquisition: {
+      status: "available",
+      completeness: "partial",
+      stopReason: "provider_error",
+      configuredMaxPages: 20,
+      requestedPageSize: 5000,
+      pages: [page],
+    },
+    fetchedAt: FETCHED_AT,
+  });
+
+  assert.equal(result.enumeration.completeness, "partial");
+  assert.equal(result.enumeration.pageCount, 1);
+  assert.deepEqual(result.enumeration.contextSlots, [123]);
+  assert.equal(result.enumeration.slotConsistency, "not_guaranteed");
+  assert.deepEqual(result.acquisition, {
+    stopReason: "provider_error", configuredMaxPages: 20, requestedPageSize: 5000,
+  });
+  assert.equal(result.tokenAccountCount, 1);
+  assert.equal(result.nonzeroTokenAccountCount, 1);
+  assert.equal(result.tokenAccountStateSummary.initialized.observedBalanceRaw, "25");
+  assert.equal(result.observedPositiveBalanceRaw, "25");
+  assert.equal(result.rawOwnerCount, 1);
+  assert.equal(result.rawOwnerAuthorities[0].balanceRaw, "25");
+  assert.equal(result.amountCoverage.state, "complete");
+  for (const metric of Object.values(result.concentration)) {
+    assert.equal(metric.status, "unavailable");
+    assert.equal(metric.reason, "enumeration_incomplete");
+    assert.equal(metric.numeratorRaw, null);
+  }
+  assert.equal(JSON.stringify(result).includes("paginationKey"), false);
+});
+
+test("partial enumeration and partial amount coverage remain separate axes", () => {
+  const result = normalizeSolanaHolderStructure({
+    mintAddress: MINT,
+    tokenProgram: "token-2022",
+    decimals: 6,
+    currentMintSupplyRaw: "1000",
+    mintExtensionTypes: [],
+    acquisition: {
+      status: "available",
+      completeness: "partial",
+      stopReason: "provider_error",
+      configuredMaxPages: 20,
+      requestedPageSize: 5000,
+      pages: [{
+        accounts: [account(1, "25", { program: "token-2022", extension: { type: 2 } })],
+        paginationKey: "2",
+        contextSlot: 123,
+      }],
+    },
+    fetchedAt: FETCHED_AT,
+  });
+  assert.equal(result.enumeration.completeness, "partial");
+  assert.equal(result.amountCoverage.state, "partial");
+  assert.equal(result.amountCoverage.reason, "unsupported_balance_affecting_extension");
+  assert.equal(result.rawOwnerAuthorities[0].balanceRaw, "25");
+  assert.equal(result.concentration.top1.reason, "enumeration_incomplete");
+});
+
+test("unavailable acquisition cannot be normalized as an empty complete holder snapshot", () => {
+  assert.throws(() => normalizeSolanaHolderStructure({
+    mintAddress: MINT,
+    tokenProgram: "spl-token",
+    decimals: 6,
+    currentMintSupplyRaw: "1000",
+    mintExtensionTypes: [],
+    acquisition: {
+      status: "unavailable",
+      reason: "provider_error",
+      configuredMaxPages: 20,
+      requestedPageSize: 5000,
+      pages: [],
+    },
+    fetchedAt: FETCHED_AT,
+  }), /unavailable.*cannot be normalized/i);
+});
+
+test("rejects malformed acquisition status and cap provenance at the normalization boundary", () => {
+  const base = {
+    mintAddress: MINT,
+    tokenProgram: "spl-token",
+    decimals: 6,
+    currentMintSupplyRaw: "1000",
+    mintExtensionTypes: [],
+    fetchedAt: FETCHED_AT,
+  };
+  const page = { accounts: [], paginationKey: "2", contextSlot: 123 };
+  assert.throws(() => normalizeSolanaHolderStructure({
+    ...base,
+    acquisition: {
+      status: "available", completeness: "unknown", stopReason: "provider_terminated",
+      configuredMaxPages: 20, requestedPageSize: 5000, pages: [page],
+    },
+  }), /completeness is malformed/i);
+  assert.throws(() => normalizeSolanaHolderStructure({
+    ...base,
+    acquisition: {
+      status: "available", completeness: "partial", stopReason: "provider_terminated",
+      configuredMaxPages: 20, requestedPageSize: 5000, pages: [page],
+    },
+  }), /contradicts its stop reason/i);
+  assert.throws(() => normalizeSolanaHolderStructure({
+    ...base,
+    acquisition: {
+      status: "available", completeness: "partial", stopReason: "page_cap",
+      configuredMaxPages: 20, requestedPageSize: 5000, pages: [page],
+    },
+  }), /page count contradicts its stop reason/i);
+});
+
 test("partial Token-2022 amount coverage is unchanged while state evidence remains observable", () => {
   const result = normalize([account(1, "10", { state: 2, program: "token-2022", extension: { type: 2 } })], {
     tokenProgram: "token-2022",

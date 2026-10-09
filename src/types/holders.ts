@@ -13,6 +13,39 @@ export interface RawSolanaTokenAccountPage {
   contextSlot: number;
 }
 
+export type SolanaTokenAccountAcquisitionStopReason =
+  | "provider_terminated"
+  | "page_cap"
+  | "request_timeout"
+  | "provider_error"
+  | "malformed_response";
+
+/** Raw pages and their cursors are internal acquisition data and must not be serialized. */
+export type SolanaTokenAccountAcquisitionResult =
+  | {
+      status: "available";
+      completeness: "complete";
+      stopReason: "provider_terminated";
+      configuredMaxPages: 20;
+      requestedPageSize: 5000;
+      pages: RawSolanaTokenAccountPage[];
+    }
+  | {
+      status: "available";
+      completeness: "partial";
+      stopReason: Exclude<SolanaTokenAccountAcquisitionStopReason, "provider_terminated">;
+      configuredMaxPages: 20;
+      requestedPageSize: 5000;
+      pages: RawSolanaTokenAccountPage[];
+    }
+  | {
+      status: "unavailable";
+      reason: "configuration_error" | Exclude<SolanaTokenAccountAcquisitionStopReason, "provider_terminated" | "page_cap">;
+      configuredMaxPages: 20;
+      requestedPageSize: 5000;
+      pages: [];
+    };
+
 export interface HolderOwnerBalance {
   ownerAddress: string;
   balanceRaw: string;
@@ -87,3 +120,28 @@ export interface SolanaHolderStructure {
     top20: HolderConcentration;
   };
 }
+
+type PartialHolderConcentration = Omit<Extract<HolderConcentration, { status: "unavailable" }>, "reason"> & {
+  reason: "enumeration_incomplete";
+};
+
+/** Partial observed rows are deliberately not assignable to complete-only snapshot/Step 5 inputs. */
+export type SolanaPartialHolderStructure = Omit<SolanaHolderStructure, "enumeration" | "concentration"> & {
+  enumeration: {
+    completeness: "partial";
+    slotConsistency: "not_guaranteed";
+    pageCount: number;
+    contextSlots: number[];
+  };
+  acquisition: {
+    stopReason: Exclude<SolanaTokenAccountAcquisitionStopReason, "provider_terminated">;
+    configuredMaxPages: 20;
+    requestedPageSize: 5000;
+  };
+  concentration: {
+    top1: PartialHolderConcentration;
+    top5: PartialHolderConcentration;
+    top10: PartialHolderConcentration;
+    top20: PartialHolderConcentration;
+  };
+};
