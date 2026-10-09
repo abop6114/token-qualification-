@@ -2,8 +2,10 @@ import type { RawSolanaAccount } from "../providers/solana/heliusRpc";
 import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../types/solana";
 import { encodeSolanaPublicKey, isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 import {
+  parseToken2022MintExtensionEntries,
   parseToken2022MintExtensionTypes,
   parseToken2022TokenAccountExtensionTypes,
+  type Token2022MintExtensionEntry,
 } from "./token2022Extensions";
 
 const MINT_BASE_SIZE = 82;
@@ -137,6 +139,13 @@ export function getSolanaMintExtensionTypes(
   account: RawSolanaAccount,
   tokenProgram: TokenProgram,
 ): number[] {
+  return getSolanaMintExtensionEntries(account, tokenProgram).map(({ extensionTypeId }) => extensionTypeId);
+}
+
+export function getSolanaMintExtensionEntries(
+  account: RawSolanaAccount,
+  tokenProgram: TokenProgram,
+): Token2022MintExtensionEntry[] {
   if (tokenProgram === "spl-token") return [];
 
   const data = decodeBase64(account.dataBase64);
@@ -145,11 +154,11 @@ export function getSolanaMintExtensionTypes(
   }
   if (data.byteLength === MINT_BASE_SIZE) return [];
 
-  const extensionTypes = parseToken2022MintExtensionTypes(data);
-  if (extensionTypes === null) {
+  const extensionEntries = parseToken2022MintExtensionEntries(data);
+  if (extensionEntries === null) {
     throw new Error("Resolved Token-2022 mint has malformed extension data.");
   }
-  return extensionTypes;
+  return extensionEntries;
 }
 
 function normalizeMint(data: Uint8Array, tokenProgram: TokenProgram, mintAddress: string): SolanaMintResolution {
