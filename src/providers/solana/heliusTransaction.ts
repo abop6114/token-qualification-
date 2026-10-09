@@ -12,6 +12,7 @@ function isJsonObject(value: unknown): value is JsonObject {
 export type HeliusTransactionErrorCategory =
   | "configuration"
   | "transport"
+  | "request_timeout"
   | "http"
   | "rpc"
   | "malformed_response";
@@ -63,7 +64,8 @@ export async function getHeliusTransaction(
         method: "getTransaction",
         params: [signature, {
           encoding: "json",
-          maxSupportedTransactionVersion: 1,
+          commitment: "finalized",
+          maxSupportedTransactionVersion: 0,
         }],
       }),
     });
@@ -82,7 +84,7 @@ export async function getHeliusTransaction(
       payload = await response.json();
     } catch {
       if (controller.signal.aborted) {
-        throw new HeliusTransactionProviderError("transport", "Helius transaction request timed out.");
+        throw new HeliusTransactionProviderError("request_timeout", "Helius transaction request timed out.");
       }
       throw new HeliusTransactionProviderError("malformed_response", "Helius returned malformed transaction JSON.");
     }
@@ -107,7 +109,7 @@ export async function getHeliusTransaction(
     return { status: "returned", transaction: payload.result };
   } catch (error: unknown) {
     if (controller.signal.aborted) {
-      throw new HeliusTransactionProviderError("transport", "Helius transaction request timed out.");
+      throw new HeliusTransactionProviderError("request_timeout", "Helius transaction request timed out.");
     }
     if (error instanceof HeliusTransactionProviderError) throw error;
     throw new HeliusTransactionProviderError("transport", "Helius transaction request failed.");

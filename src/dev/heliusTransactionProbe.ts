@@ -28,7 +28,8 @@ export interface HeliusTransactionProbeResult {
     requestedSignature: string;
     method: "getTransaction";
     encoding: "json";
-    maxSupportedTransactionVersion: 1;
+    commitment: "finalized";
+    maxSupportedTransactionVersion: 0;
     requestCount: number;
   };
   elapsedMs: number;
@@ -445,7 +446,8 @@ export async function runHeliusTransactionProbe(
     requestedSignature: input.signature,
     method: "getTransaction" as const,
     encoding: "json" as const,
-    maxSupportedTransactionVersion: 1 as const,
+    commitment: "finalized" as const,
+    maxSupportedTransactionVersion: 0 as const,
     requestCount: 0,
   };
   if (process.env.HELIUS_API_KEY === undefined || process.env.HELIUS_API_KEY.trim() === "") {

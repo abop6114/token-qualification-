@@ -101,7 +101,9 @@ test("requests one legacy transaction with the explicit JSON configuration", asy
     assert.equal(result.transaction.instructions.indexResolution, "resolved");
     assert.equal(requests.length, 1);
     assert.equal(requests[0].request.method, "getTransaction");
-    assert.deepEqual(requests[0].request.params, [TX_SIGNATURE, { encoding: "json", maxSupportedTransactionVersion: 1 }]);
+    assert.deepEqual(requests[0].request.params, [TX_SIGNATURE, { encoding: "json", commitment: "finalized", maxSupportedTransactionVersion: 0 }]);
+    assert.equal(result.request.commitment, "finalized");
+    assert.equal(result.request.maxSupportedTransactionVersion, 0);
     assert.match(requests[0].url, /^https:\/\/mainnet\.helius-rpc\.com\//);
     assert.equal(JSON.stringify(result).includes(API_KEY), false);
     assert.equal(JSON.stringify(result).includes("api-key="), false);
@@ -305,7 +307,7 @@ test("aborts a stalled request, reports a sanitized timeout, and does not retry"
     assert.equal(calls, 1);
     assert.equal(result.request.requestCount, 1);
     assert.equal(result.status, "provider_error");
-    assert.equal(result.error.category, "transport");
+    assert.equal(result.error.category, "request_timeout");
     assert.equal(result.error.message, "Helius transaction request timed out.");
     assert.equal(signal.aborted, true);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(API_KEY));

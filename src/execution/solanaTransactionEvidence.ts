@@ -27,7 +27,8 @@ function provenance(signature: string, fetchedAt: string): SolanaTransactionRequ
     provider: "helius",
     method: "getTransaction",
     encoding: "json",
-    maxSupportedTransactionVersion: 1,
+    commitment: "finalized",
+    maxSupportedTransactionVersion: 0,
     requestedSignature: signature,
     fetchedAt,
   };

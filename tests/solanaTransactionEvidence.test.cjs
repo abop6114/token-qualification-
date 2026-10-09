@@ -41,7 +41,7 @@ function legacyTransaction(overrides = {}) {
     slot: 451369028,
     blockTime: 1790611915,
     transaction: {
-      signatures: [REQUESTED],
+      signatures: [REQUESTED, signature(8)],
       message: {
         accountKeys: keys,
         header: { numRequiredSignatures: 2, numReadonlySignedAccounts: 1, numReadonlyUnsignedAccounts: 1 },
@@ -79,7 +79,7 @@ function v0Transaction() {
     slot: 451369100,
     blockTime: 1790612000,
     transaction: {
-      signatures: [REQUESTED, signature(8)],
+      signatures: [REQUESTED],
       message: {
         accountKeys: staticKeys,
         header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 1 },
@@ -354,6 +354,13 @@ test("returns sanitized malformed outcomes for signature, static key, header, an
     error instanceof SolanaTransactionNormalizationError && error.reason === "malformed_structure");
 });
 
+test("rejects returned signature count that contradicts required signer count", () => {
+  const transaction = legacyTransaction();
+  transaction.transaction.signatures.pop();
+  assert.throws(() => normalizeSolanaTransactionEvidence(transaction, REQUESTED), (error) =>
+    error instanceof SolanaTransactionNormalizationError && error.reason === "malformed_structure");
+});
+
 test("preserves unavailable slot and block-time evidence rather than coercing malformed numbers", () => {
   const transaction = legacyTransaction({ slot: Number.MAX_SAFE_INTEGER + 1, blockTime: "1790611915" });
   const result = normalizeSolanaTransactionEvidence(transaction, REQUESTED);
@@ -400,12 +407,13 @@ test("one-request production boundary preserves provenance and separates null fr
     assert.equal(result.evidence.provenance.provider, "helius");
     assert.equal(result.evidence.provenance.method, "getTransaction");
     assert.equal(result.evidence.provenance.encoding, "json");
-    assert.equal(result.evidence.provenance.maxSupportedTransactionVersion, 1);
+    assert.equal(result.evidence.provenance.commitment, "finalized");
+    assert.equal(result.evidence.provenance.maxSupportedTransactionVersion, 0);
     assert.equal(result.evidence.provenance.fetchedAt, "2026-10-06T12:00:00.000Z");
     assert.equal(result.telemetry.requestCount, 1);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].body.method, "getTransaction");
-    assert.deepEqual(requests[0].body.params, [REQUESTED, { encoding: "json", maxSupportedTransactionVersion: 1 }]);
+    assert.deepEqual(requests[0].body.params, [REQUESTED, { encoding: "json", commitment: "finalized", maxSupportedTransactionVersion: 0 }]);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(API_KEY));
     assert.doesNotMatch(JSON.stringify(result), /api-key=/);
   });
@@ -490,7 +498,7 @@ test("timeout is bounded, sanitized, and never retried", async () => {
     assert.equal(calls, 1);
     assert.equal(result.telemetry.requestCount, 1);
     assert.equal(result.evidence.status, "provider_error");
-    assert.equal(result.evidence.error.category, "transport");
+    assert.equal(result.evidence.error.category, "request_timeout");
     assert.equal(result.evidence.error.message, "Helius transaction request timed out.");
     assert.equal(signal.aborted, true);
     assert.doesNotMatch(JSON.stringify(result), new RegExp(API_KEY));

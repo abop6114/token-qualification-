@@ -566,6 +566,10 @@ export function normalizeSolanaTransactionEvidence(raw: unknown, requestedSignat
   }
   if (!isObject(transaction.message)) malformed("The returned transaction message is missing or malformed.");
   const message = transaction.message;
+  if (!isObject(message.header) || !safeUnsignedInteger(message.header.numRequiredSignatures) ||
+    signatures.length !== message.header.numRequiredSignatures) {
+    malformed("The returned transaction signature count does not match its required signer count.");
+  }
   // The RPC response reports transaction version beside (not inside) the
   // transaction/message object.
   const version = parseVersion(raw);

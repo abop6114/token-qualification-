@@ -13,14 +13,15 @@ export interface SolanaTransactionRequestProvenance {
   provider: "helius";
   method: "getTransaction";
   encoding: "json";
-  maxSupportedTransactionVersion: 1;
+  commitment: "finalized";
+  maxSupportedTransactionVersion: 0;
   requestedSignature: string;
   /** Application time at which the single request is started. */
   fetchedAt: string;
 }
 
 export interface SolanaTransactionProviderError {
-  category: "configuration" | "transport" | "http" | "rpc";
+  category: "configuration" | "transport" | "request_timeout" | "http" | "rpc";
   httpStatus: number | null;
   rpcCode: number | null;
   message: string;
