@@ -7,9 +7,9 @@
 ## 2. Current checkpoint
 
 - Branch: `main`
-- HEAD and `origin/main` are synchronized at `20ee0e5` — `feat: add deterministic Solana not-excluded concentration evidence`
-- The repository was clean at this checkpoint; this documentation refresh is the only intended working-tree change.
-- Current validation at the checkpoint: `npm test` passed, including its TypeScript build: **466 tests passed, 0 failed**; the separate TypeScript build passed.
+- **Implementation checkpoint: `4938c64` — `feat: propagate partial Solana historical evidence`.** `HEAD` and `origin/main` are synchronized at this checkpoint.
+- The repository was clean before this documentation refresh. The implementation checkpoint is `4938c64`; this documentation change is not part of that checkpoint.
+- Current full-suite result at the implementation checkpoint: **525 tests passed, 0 failed**. `npm test` includes the TypeScript build.
 - The project began as a Solana-first CLI/JSON prototype. Committed Base/Ethereum work is an evidence-feasibility extension; it is not EVM CLI/product integration.
 
 ## 3. Product objective
@@ -48,6 +48,44 @@ The committed Solana path includes:
 - One-transaction structural evidence normalization for `getTransaction`; this does not classify swaps, buys/sells, funding, or economic behavior.
 - Immutable holder snapshots, two-snapshot comparison, and multi-snapshot observed persistence evidence. Absence-to-zero is gated by complete evidence; captures do not imply continuous ownership.
 - Development-only Helius transfer-history and single-transaction feasibility probes remain separate from ordinary CLI behavior.
+
+### Phase 1A — bounded Solana holder acquisition
+
+Solana holder acquisition is now bounded by these operational settings:
+
+- Requested page size: **5,000** token accounts.
+- Configured maximum: **20 pages**.
+- **100,000 returned token-account records** is the maximum before provider termination is required to claim complete enumeration. This is an operational bound, not evidence that 100,000 records are sufficient to cover every token's holders.
+- Per-request timeout: **30 seconds**.
+- Retries: **zero**.
+- There is not yet a total acquisition deadline.
+
+Acquisition distinguishes `complete`, `partial`, and `unavailable`. Complete enumeration requires explicit provider pagination termination. If one or more pages have been accepted and acquisition then stops at a page cap, times out, or encounters a provider or malformed-response failure, the accepted prefix is retained as partial evidence. If failure occurs before any page is accepted, the result is unavailable. Page acceptance is transactional: a page and its observations enter evidence only after that page passes validation. Partial enumeration does not support a global supply-relative Top-N holder concentration claim.
+
+### Phase 1B-1 — partial-aware immutable snapshots
+
+V1 snapshot contracts remain preserved and reproducible. New captures can use immutable snapshot-record V2, which includes acquisition provenance and represents both complete and partial captures. V1 and V2 comparison/series evidence coexist. Balances remain exact observed values; absence from a partial enumeration is unknown, not zero. A partial intermediate capture cannot prove absence or persistence, and partial snapshots do not establish global holder totals.
+
+### Phase 1B-2 — partial-aware Step 5 evidence
+
+Parallel V2 contracts are implemented for address-role evidence, holder-exclusion assessment, the not-excluded owner-authority population, and not-excluded concentration. Existing V1 contracts and behavior are preserved. The policy remains `solana-address-exclusion-policy-v1`; no automatic exclusion rule was added.
+
+Subjects are observed positive owner authorities. Authorities missing from a partial enumeration are not assessment subjects. Exact evidence for an observed row remains usable; a row-level sufficient `retain` decision can remain valid even when the overall candidate population is partial. Unresolved subjects remain included in the not-excluded population. Only explicit policy-authorized `exclude` decisions can be removed.
+
+Concentration V2 preserves two distinct measures:
+
+- **A — `notExcludedTopNCurrentMintSupplyShare`:** unavailable with `enumeration_incomplete` when enumeration is partial. Its numerator is not calculated from the partial frame and presented as a global numerator.
+- **B — `notExcludedObservedPopulationTopNShare`:** may be numeric over a positive observed not-excluded denominator, but remains explicitly partial when source evidence is partial.
+
+The documented deterministic partial-reason order is: (1) enumeration incomplete, (2) unsupported balance-affecting extension, (3) supply inconsistency. V1 contracts and raw concentration remain preserved.
+
+### Phase 1B-3 — historical candidate-frame propagation
+
+Historical selection remains over **raw observed positive owner authorities**; it was not switched to the Step 5B-2 not-excluded population. Selector V1 remains preserved. Selector V2 consumes validated snapshot-record V2. Query-plan V1 remains preserved; query-plan V2 consumes snapshot V2 and selector V2. Execution accepts V1 and V2 plans. Historical descriptive metrics remain `solana-historical-descriptive-metrics-v1`.
+
+`observedCandidateFrameRank` is exact only within the observed candidate frame. It is not necessarily a global holder rank. With a partial source frame, rank zero must not be described as the token's largest holder.
+
+Keep these three completeness dimensions separate: (1) source candidate-frame completeness, (2) selection completeness relative to the observed frame, and (3) selected-authority historical query completion. Successful completion of every selected query does not upgrade a partial source frame to complete.
 
 **Step 5A — deterministic address-role evidence** (`0f113e6 feat: add deterministic Solana address role evidence`): the `SolanaAddressRoleEvidence` sidecar records exact address correlations for `base_mint_authority_address`, `base_freeze_authority_address`, and `dexscreener_reported_pool_address`. It adds no provider calls, exclusions, or adjusted concentration, and does not mutate raw holder evidence. Successful mint resolution carries the requested canonical mint address so role evidence cannot combine a different mint resolution with holder or market evidence.
 
@@ -127,7 +165,7 @@ These are non-blocking design observations, not requests for immediate refactori
 
 ## 11. Validation and testing posture
 
-Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At this checkpoint the verified full suite is **466 passing tests**; `npm test` also runs the TypeScript build.
+Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At implementation checkpoint `4938c64`, the verified full suite is **525 passing tests**; `npm test` also runs the TypeScript build.
 
 ## 12. Cost and operating constraints
 
@@ -135,9 +173,13 @@ Preserve Project Context V1 constraints: the normal development/early-beta opera
 
 Prefer progressive analysis, bounded queries and sampling, metric-specific caching/reuse, and per-provider usage/cost telemetry. Avoid unbounded per-wallet/signature fanout and unnecessary AI calls for objective facts. Public/beta precedes payment; actual cost and usage should inform later controls.
 
-Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Solana token-account enumeration currently continues until explicit provider pagination termination and has no configured page/record cap; this is a tracked future cost/latency risk for very large tokens, not a change authorized by the completed milestones.
+Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Phase 1A/1B added no provider or data source, did not increase historical selection or per-authority page/record caps, and does not query additional historical authorities merely because holder enumeration is partial. Partial evidence changes provenance and interpretation, not historical query fanout. Solana token-account acquisition can still be relatively expensive, but is now explicitly bounded by the 20-page guardrail; the bound does not establish provider-wide or blockchain-wide completeness by itself.
 
-## 13. Explicitly deferred / not implemented
+## 13. Public presentation boundary
+
+Raw token-account lists, owner-authority candidate lists, provider pages, pagination cursors, and raw historical transaction payloads are internal deterministic evidence. Future public presentation should expose derived or aggregate evidence with appropriate coverage and confidence, rather than dumping raw address or provider data. A partial observed count must not be presented as an exact total-holder count. Exact user-facing wording remains deferred.
+
+## 14. Explicitly deferred / not implemented
 
 The following are not current product conclusions or implemented classifications:
 
@@ -159,15 +201,15 @@ Descriptive evidence already present must not be mislabeled as any of these late
 
 Cash Cat, Super Cat, and SANTA remain reference/validation cases only; they are not permanent production scoring benchmarks.
 
-## 14. Next architectural boundary
+## 15. Next architectural boundary
 
 **Step 5B-2 — not-excluded population evidence: IMPLEMENTED.** It consumes the immutable holder snapshot and Step 5B-1 assessment, validates exact subject/balance correspondence, and reports an auditable partition. It does not change raw evidence or calculate concentration.
 
 **Step 5B-3 — not-excluded concentration evidence: IMPLEMENTED at `20ee0e5`.** It consumes Step 5B-2 evidence and reports separate current-mint-supply and observed-not-excluded-population Top-N views under the availability and completeness semantics recorded above. It makes no provider calls, does not mutate raw concentration, and does not change the exclusion policy.
 
-After this documentation refresh, select the next engineering step deliberately from the remaining roadmap. This handoff does not claim that a next feature has been selected or approved. In particular, the existence of concentration evidence does not authorize scoring or qualification integration. Future work remains subject to reconnaissance, evidence review, bounded implementation, and explicit methodology approval where required.
+Bounded partial-evidence propagation is complete through the currently implemented Solana holder and historical evidence path. Select the next major implementation priority only after reviewing the updated capability gaps and project objectives; this handoff does not invent or approve a new phase. The existence of concentration evidence does not authorize scoring or qualification integration. Future work remains subject to reconnaissance, evidence review, bounded implementation, and explicit methodology approval where required.
 
-## 15. Development workflow
+## 16. Development workflow
 
 - Environment: Windows + PowerShell.
 - Repository: `C:\Users\justi\Projects\token-qualification-`
@@ -178,6 +220,6 @@ After this documentation refresh, select the next engineering step deliberately 
 - Do not make silent methodology changes.
 - Do not commit review scratch artifacts. Commit only after the explicit review gate.
 
-## 16. Fresh-thread startup instruction
+## 17. Fresh-thread startup instruction
 
 > Continue development of the Token Qualification Engine. Use Token Qualification Engine Project Context V1 as the authoritative product/methodology baseline, TQE_DEVELOPMENT_STATE.md as the current implementation handoff, and the repository code/tests as the authority for exact behavior. Review the handoff and recommend the next architectural step before writing code.
