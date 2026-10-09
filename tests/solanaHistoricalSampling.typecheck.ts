@@ -6,6 +6,11 @@ import type {
   SolanaHistoricalPageEvidence,
   SolanaHistoricalTransferObservation,
 } from "../src/types/solanaHistoricalSampling";
+import type { SolanaHistoricalAuthoritySelection, SolanaHistoricalAuthoritySelectionV2 } from "../src/types/solanaHistoricalAuthoritySelection";
+import type { SolanaHistoricalQueryPlan, SolanaHistoricalQueryPlanV2, SolanaHistoricalQueryPlanVersioned } from "../src/types/solanaHistoricalQueryPlan";
+import type { SolanaHolderSnapshotRecordV2 } from "../src/types/solanaHolderSnapshot";
+import type { SolanaPartialHolderStructure } from "../src/types/holders";
+import type { BuildSolanaHistoricalQueryPlanV2Input } from "../src/normalization/solanaHistoricalQueryPlan";
 
 const heliusRecord: HeliusTransferObservation = {
   signature: "signature",
@@ -140,6 +145,28 @@ const evidence: SolanaBoundedHistoricalSamplingEvidence = {
   applicationDerivedEvidence: { status: "not_calculated", metrics: null },
 };
 
+declare const v1Selection: SolanaHistoricalAuthoritySelection;
+declare const v2Selection: SolanaHistoricalAuthoritySelectionV2;
+declare const v2Snapshot: SolanaHolderSnapshotRecordV2;
+declare const v1Plan: SolanaHistoricalQueryPlan;
+declare const v2Plan: SolanaHistoricalQueryPlanV2;
+const acceptedVersionedPlans: SolanaHistoricalQueryPlanVersioned[] = [v1Plan, v2Plan];
+const validV2PlanInput: BuildSolanaHistoricalQueryPlanV2Input = {
+  snapshotRecord: v2Snapshot,
+  selection: v2Selection,
+  requestedWindow: { fromUnixSecondsInclusive: 1, toUnixSecondsExclusive: 2 },
+  maxPagesPerAuthority: 1,
+  maxRecordsPerAuthority: 1,
+};
+type V1SelectorInput = Parameters<typeof import("../src/normalization/solanaHistoricalAuthoritySelector").selectSolanaHistoricalAuthorities>[0];
+declare const partialHolderStructure: SolanaPartialHolderStructure;
+// @ts-expect-error V1 selector remains complete-enumeration-only.
+const invalidV1PartialInput: V1SelectorInput = partialHolderStructure;
+// @ts-expect-error A V1 selector cannot be wired to a V2 snapshot/plan.
+const invalidV2PlanInput: BuildSolanaHistoricalQueryPlanV2Input = { ...validV2PlanInput, selection: v1Selection };
+// @ts-expect-error A V2 selector is not accepted by the V1 selector contract.
+const invalidV1Selection: SolanaHistoricalAuthoritySelection = v2Selection;
+
 // @ts-expect-error A not-queried authority cannot represent a successful empty query.
 const invalidNotQueried: SolanaHistoricalAuthorityEvidence = { authorityAddress: "x", queryStatus: "not_queried", reason: "not_selected", paginationStatus: "complete", terminalReason: "natural_termination", requestCount: 0, pages: [], observations: [], providerError: null };
 // @ts-expect-error A truncated query cannot claim natural termination.
@@ -155,4 +182,4 @@ const invalidNumericProviderAmount: SolanaHistoricalTransferObservation = { prov
 // @ts-expect-error Amount evidence cannot be supplied a second time beside the provider record.
 const invalidDuplicatedAmountEvidence: SolanaHistoricalTransferObservation = { providerRecord: observation.providerRecord, observedTime: observation.observedTime, amountEvidence: numericAmount };
 
-void [evidence, numericObservation, invalidNotQueried, invalidTruncated, invalidFailure, invalidPage, invalidAmount, invalidNumericProviderAmount, invalidDuplicatedAmountEvidence];
+void [evidence, numericObservation, invalidNotQueried, invalidTruncated, invalidFailure, invalidPage, invalidAmount, invalidNumericProviderAmount, invalidDuplicatedAmountEvidence, acceptedVersionedPlans, validV2PlanInput, invalidV1PartialInput, invalidV2PlanInput, invalidV1Selection];

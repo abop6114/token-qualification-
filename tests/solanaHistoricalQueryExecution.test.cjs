@@ -3,8 +3,11 @@ const { test } = require("node:test");
 const { executeSolanaHistoricalQueryPlan } = require("../dist/execution/solanaHistoricalQueryExecution.js");
 const { getHeliusHistoricalTransferPage } = require("../dist/providers/solana/heliusHistoricalTransferAdapter.js");
 const { HeliusTransferProviderError } = require("../dist/providers/solana/heliusTransfersByAddress.js");
-const { buildSolanaHistoricalQueryPlan } = require("../dist/normalization/solanaHistoricalQueryPlan.js");
-const { selectSolanaHistoricalAuthorities } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { buildSolanaHistoricalQueryPlan, buildSolanaHistoricalQueryPlanV2 } = require("../dist/normalization/solanaHistoricalQueryPlan.js");
+const { selectSolanaHistoricalAuthorities, selectSolanaHistoricalAuthoritiesV2 } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
+const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
+const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
@@ -52,6 +55,32 @@ function makePlan(balances = [100, 90, 80, 70], selectionCap = 2, overrides = {}
     maxRecordsPerAuthority: 5,
     ...overrides,
   });
+}
+
+function makePlanV2(balances = [100, 90, 80, 70], selectionCap = 2, partial = false) {
+  const accounts = balances.map((balance, index) => {
+    const data = Buffer.alloc(165);
+    data.set(Buffer.alloc(32, 42), 0);
+    data.set(Buffer.alloc(32, index + 1), 32);
+    data.writeBigUInt64LE(BigInt(balance), 64);
+    data[108] = 1;
+    return { address: key(index + 100), programOwner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], dataBase64: data.toString("base64"), reportedSpace: data.length };
+  });
+  const holder = normalizeSolanaHolderStructure({
+    mintAddress: MINT, tokenProgram: "spl-token", decimals: 6,
+    currentMintSupplyRaw: String(balances.reduce((sum, value) => sum + BigInt(value), 100n)), mintExtensionTypes: [],
+    fetchedAt: "2026-10-01T12:00:00.000Z",
+    ...(partial
+      ? { acquisition: { status: "available", completeness: "partial", stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000, pages: [{ accounts, paginationKey: "2", contextSlot: 100 }] } }
+      : { pages: [{ accounts, paginationKey: null, contextSlot: 100 }] }),
+  });
+  const record = partial
+    ? createSolanaHolderSnapshotRecordV2(holder)
+    : createSolanaHolderSnapshotRecordV2(holder, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+  const selection = selectSolanaHistoricalAuthoritiesV2(record, selectionCap);
+  return buildSolanaHistoricalQueryPlanV2({ snapshotRecord: record, selection,
+    requestedWindow: { fromUnixSecondsInclusive: 1_700_000_000, toUnixSecondsExclusive: 1_700_086_400 },
+    maxPagesPerAuthority: 3, maxRecordsPerAuthority: 5 });
 }
 
 function integerStringAmount(value) {
@@ -392,4 +421,29 @@ test("does not mutate the plan or execution inputs", async () => {
     fetchPage: async () => ({ observations: [], paginationToken: null }),
   });
   assert.deepEqual(plan, before);
+});
+
+test("V2 complete plan has equivalent provider behavior and evidence to V1", async () => {
+  const v1 = makePlan([100, 90, 80, 70], 2);
+  const v2 = makePlanV2([100, 90, 80, 70], 2);
+  const makeFetcher = () => async () => ({ observations: [transfer("equivalent", integerStringAmount("42"))], paginationToken: null });
+  const v1Result = await executeSolanaHistoricalQueryPlan(v1, { requestTimeoutMs: 5_000, now: fixedClock, fetchPage: makeFetcher() });
+  const v2Result = await executeSolanaHistoricalQueryPlan(v2, { requestTimeoutMs: 5_000, now: fixedClock, fetchPage: makeFetcher() });
+  assert.deepEqual(v2Result.evidence, v1Result.evidence);
+  assert.deepEqual(v2Result.telemetry, v1Result.telemetry);
+  assert.equal(v2Result.plan, v2);
+});
+
+test("partial V2 candidate scope remains partial when every selected query completes", async () => {
+  const plan = makePlanV2([100, 90, 80, 70], 2, true);
+  const result = await executeSolanaHistoricalQueryPlan(plan, {
+    requestTimeoutMs: 5_000, now: fixedClock,
+    fetchPage: async () => ({ observations: [transfer("partial-frame", integerStringAmount("42"))], paginationToken: null }),
+  });
+  assert.equal(result.evidence.authorityScope.candidateSetCompleteness, "partial");
+  assert.equal(result.evidence.authorities.filter((authority) => authority.queryStatus === "success").length, 2);
+  assert.equal(result.evidence.authorities.filter((authority) => authority.queryStatus === "not_queried").length, 2);
+  assert.ok(result.evidence.authorities.filter((authority) => authority.queryStatus === "not_queried").every((authority) => authority.observations.length === 0));
+  assert.equal(result.telemetry.requestCount, 2);
+  assert.equal(result.telemetry.selectedAuthorityCount, 2);
 });

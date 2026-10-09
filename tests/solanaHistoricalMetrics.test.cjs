@@ -3,8 +3,11 @@ const { test } = require("node:test");
 const { calculateSolanaHistoricalDescriptiveMetrics } = require("../dist/normalization/solanaHistoricalMetrics.js");
 const { executeSolanaHistoricalQueryPlan } = require("../dist/execution/solanaHistoricalQueryExecution.js");
 const { HeliusTransferProviderError } = require("../dist/providers/solana/heliusTransfersByAddress.js");
-const { buildSolanaHistoricalQueryPlan } = require("../dist/normalization/solanaHistoricalQueryPlan.js");
-const { selectSolanaHistoricalAuthorities } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { buildSolanaHistoricalQueryPlan, buildSolanaHistoricalQueryPlanV2 } = require("../dist/normalization/solanaHistoricalQueryPlan.js");
+const { selectSolanaHistoricalAuthorities, selectSolanaHistoricalAuthoritiesV2 } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
+const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
+const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
@@ -48,6 +51,32 @@ function makePlan(balances = [100, 90], selectedCount = 2, overrides = {}) {
     maxRecordsPerAuthority: 20,
     ...overrides,
   });
+}
+
+function makePlanV2(balances = [100, 90], selectedCount = 2, partial = false) {
+  const accounts = balances.map((balance, index) => {
+    const data = Buffer.alloc(165);
+    data.set(Buffer.alloc(32, 42), 0);
+    data.set(Buffer.alloc(32, index + 1), 32);
+    data.writeBigUInt64LE(BigInt(balance), 64);
+    data[108] = 1;
+    return { address: key(index + 100), programOwner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], dataBase64: data.toString("base64"), reportedSpace: data.length };
+  });
+  const holder = normalizeSolanaHolderStructure({
+    mintAddress: MINT, tokenProgram: "spl-token", decimals: 6,
+    currentMintSupplyRaw: String(balances.reduce((sum, value) => sum + BigInt(value), 100n)), mintExtensionTypes: [],
+    fetchedAt: "2026-10-01T12:00:00.000Z",
+    ...(partial
+      ? { acquisition: { status: "available", completeness: "partial", stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000, pages: [{ accounts, paginationKey: "2", contextSlot: 100 }] } }
+      : { pages: [{ accounts, paginationKey: null, contextSlot: 100 }] }),
+  });
+  const record = partial
+    ? createSolanaHolderSnapshotRecordV2(holder)
+    : createSolanaHolderSnapshotRecordV2(holder, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+  const selection = selectSolanaHistoricalAuthoritiesV2(record, selectedCount);
+  return buildSolanaHistoricalQueryPlanV2({ snapshotRecord: record, selection,
+    requestedWindow: { fromUnixSecondsInclusive: 100, toUnixSecondsExclusive: 200 },
+    maxPagesPerAuthority: 3, maxRecordsPerAuthority: 20 });
 }
 
 function transfer(signature, overrides = {}) {
@@ -347,6 +376,34 @@ test("is deterministic and does not mutate plan or evidence", async () => {
   assert.deepEqual(first, second);
   assert.deepEqual(plan, planBefore);
   assert.deepEqual(execution.evidence, evidenceBefore);
+});
+
+test("V2 complete metrics preserve V1 metric definitions", async () => {
+  const v1 = makePlan([100, 90, 80], 2);
+  const v2 = makePlanV2([100, 90, 80], 2);
+  const fetchPage = async () => ({ observations: [transfer("equivalent")], paginationToken: null });
+  const v1Result = await run(v1, fetchPage);
+  const v2Result = await run(v2, fetchPage);
+  assert.deepEqual(v2Result.metrics.authorities, v1Result.metrics.authorities);
+  assert.deepEqual(v2Result.metrics.sampleCoverage, v1Result.metrics.sampleCoverage);
+  assert.deepEqual(v2Result.metrics.source, { ...v1Result.metrics.source, selectorVersion: "solana-rank-coverage-v2" });
+  assert.equal(v2Result.metrics.version, "solana-historical-descriptive-metrics-v1");
+});
+
+test("V2 metrics preserve partial candidate scope and distinguish queried from unqueried authorities", async () => {
+  const plan = makePlanV2([100, 90, 80, 70], 2, true);
+  const { execution, metrics } = await run(plan, async () => ({ observations: [transfer("partial-scope")], paginationToken: null }));
+  assert.equal(execution.evidence.authorityScope.candidateSetCompleteness, "partial");
+  assert.equal(metrics.source.candidateSetCompleteness, "partial");
+  assert.deepEqual(metrics.sampleCoverage, {
+    candidateAuthorityCount: 4, selectedAuthorityCount: 2, queriedAuthorityCount: 2,
+    naturallyCompleteAuthorityCount: 2, truncatedAuthorityCount: 0,
+    providerErrorAuthorityCount: 0, unqueriedAuthorityCount: 2,
+  });
+  assert.ok(metrics.authorities.filter((authority) => authority.queryStatus === "not_queried")
+    .every((authority) => authority.acceptedObservationCount.status === "unavailable"));
+  assert.ok(metrics.authorities.filter((authority) => authority.queryStatus === "success")
+    .every((authority) => authority.acceptedObservationCount.queryCompleteness === "complete"));
 });
 
 test("profiles all seven production amount representations in fixed order", async () => {

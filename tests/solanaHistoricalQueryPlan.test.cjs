@@ -1,7 +1,9 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { buildSolanaHistoricalQueryPlan } = require("../dist/normalization/solanaHistoricalQueryPlan.js");
-const { selectSolanaHistoricalAuthorities } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { buildSolanaHistoricalQueryPlan, buildSolanaHistoricalQueryPlanV2, validateSolanaHistoricalQueryPlanV2 } = require("../dist/normalization/solanaHistoricalQueryPlan.js");
+const { selectSolanaHistoricalAuthorities, selectSolanaHistoricalAuthoritiesV2 } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
+const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
@@ -52,6 +54,36 @@ function planInput(balances, authorityCap = 2) {
 
 function makePlan(input) {
   return buildSolanaHistoricalQueryPlan(input);
+}
+
+function validSnapshotRecordV2(balances, partial = false) {
+  const accounts = balances.map((balance, index) => {
+    const data = Buffer.alloc(165);
+    data.set(Buffer.alloc(32, 42), 0);
+    data.set(Buffer.alloc(32, index + 1), 32);
+    data.writeBigUInt64LE(BigInt(balance), 64);
+    data[108] = 1;
+    return { address: encodeSolanaPublicKey(Buffer.alloc(32, index + 100)), programOwner: require("../dist/types/solana.js").SOLANA_TOKEN_PROGRAM_IDS["spl-token"], dataBase64: data.toString("base64"), reportedSpace: data.length };
+  });
+  const holder = normalizeSolanaHolderStructure({
+    mintAddress: MINT, tokenProgram: "spl-token", decimals: 6,
+    currentMintSupplyRaw: String(balances.reduce((sum, value) => sum + BigInt(value), 100n)), mintExtensionTypes: [],
+    fetchedAt: "2026-10-01T12:00:00.000Z",
+    ...(partial
+      ? { acquisition: { status: "available", completeness: "partial", stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000, pages: [{ accounts, paginationKey: "2", contextSlot: 100 }] } }
+      : { pages: [{ accounts, paginationKey: null, contextSlot: 100 }] }),
+  });
+  return partial
+    ? createSolanaHolderSnapshotRecordV2(holder)
+    : createSolanaHolderSnapshotRecordV2(holder, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
+}
+
+function makePlanV2(record, cap = 2, overrides = {}) {
+  const selection = selectSolanaHistoricalAuthoritiesV2(record, cap);
+  return buildSolanaHistoricalQueryPlanV2({
+    snapshotRecord: record, selection, requestedWindow: { ...WINDOW },
+    maxPagesPerAuthority: 3, maxRecordsPerAuthority: 50, ...overrides,
+  });
 }
 
 test("validates inclusive/exclusive Unix bounds", () => {
@@ -269,4 +301,70 @@ test("plan contains no provider observations or execution outcomes", () => {
   assert.equal("method" in result, false);
   assert.equal("observations" in result, false);
   assert.equal("outcomes" in result, false);
+});
+
+test("V2 complete plan is methodologically equivalent to V1", () => {
+  const record = validSnapshotRecordV2([1, 9, 3, 7, 5]);
+  const v1Holder = { ...record.snapshot, enumeration: { ...record.snapshot.enumeration, completeness: "complete" } };
+  const v1Selection = selectSolanaHistoricalAuthorities(v1Holder, 2);
+  const v1 = buildSolanaHistoricalQueryPlan({ holderStructure: v1Holder, selection: v1Selection, requestedWindow: WINDOW, maxPagesPerAuthority: 3, maxRecordsPerAuthority: 50 });
+  const v2 = makePlanV2(record, 2);
+  assert.equal(v2.planVersion, "solana-bounded-history-query-plan-v2");
+  assert.deepEqual(v2.candidateAuthorities.map(({ authorityAddress, balanceRaw, observedCandidateFrameRank, plannedDisposition }) => ({
+    authorityAddress, balanceRaw, sourceRank: observedCandidateFrameRank, plannedDisposition,
+  })), v1.candidateAuthorities);
+  for (const field of ["mintAddress", "requestedWindow", "maxPagesPerAuthority", "maxRecordsPerAuthority", "selectedAuthorityCount", "maximumProviderRequests", "maximumReturnedRecords"]) {
+    assert.deepEqual(v2[field], v1[field]);
+  }
+});
+
+test("V2 partial plan preserves frame-local ranks, dispositions, provenance, and unchanged bounds", () => {
+  const record = validSnapshotRecordV2([1, 9, 3, 7, 5], true);
+  const before = structuredClone(record);
+  const plan = makePlanV2(record, 2);
+  assert.equal(plan.sourceHolder.candidateFrameCompleteness, "partial");
+  assert.equal(plan.sourceHolder.snapshotId, record.snapshotId);
+  assert.equal(plan.sourceHolder.acquisition.stopReason, "request_timeout");
+  assert.deepEqual(plan.candidateAuthorities.map((candidate) => candidate.observedCandidateFrameRank), [0, 1, 2, 3, 4]);
+  assert.equal(plan.maximumProviderRequests, 6);
+  assert.equal(plan.maximumReturnedRecords, 100);
+  assert.equal(plan.candidateAuthorities.filter((candidate) => candidate.plannedDisposition.status === "selected").length, 2);
+  assert.equal(plan.candidateAuthorities.filter((candidate) => candidate.plannedDisposition.status === "not_selected").length, 3);
+  assert.deepEqual(record, before);
+});
+
+test("V2 plan construction rejects selector/snapshot, rank, frame, and disposition mismatches", () => {
+  const record = validSnapshotRecordV2([10, 9, 8, 7], true);
+  const mutatedSelection = selectSolanaHistoricalAuthoritiesV2(record, 2);
+  mutatedSelection.sourceHolderSnapshotId = `sha256:${"0".repeat(64)}`;
+  assert.throws(() => buildSolanaHistoricalQueryPlanV2({ snapshotRecord: record, selection: mutatedSelection, requestedWindow: WINDOW, maxPagesPerAuthority: 3, maxRecordsPerAuthority: 50 }), /do not match the source snapshot/);
+
+  const validSelection = selectSolanaHistoricalAuthoritiesV2(record, 2);
+  const badRank = structuredClone(validSelection);
+  badRank.selectedAuthorities[0].observedCandidateFrameRank = 1;
+  assert.throws(() => buildSolanaHistoricalQueryPlanV2({ snapshotRecord: record, selection: badRank, requestedWindow: WINDOW, maxPagesPerAuthority: 3, maxRecordsPerAuthority: 50 }), /do not match the source snapshot/);
+
+  const badFrame = structuredClone(record);
+  badFrame.snapshotId = `sha256:${"0".repeat(64)}`;
+  assert.throws(() => makePlanV2(badFrame), /snapshot ID/);
+
+  const v1Input = planInput([1, 2]);
+  const v1SelectionAsV2 = v1Input.selection;
+  assert.throws(() => buildSolanaHistoricalQueryPlanV2({ snapshotRecord: record, selection: v1SelectionAsV2, requestedWindow: WINDOW, maxPagesPerAuthority: 3, maxRecordsPerAuthority: 50 }), /do not match the source snapshot/);
+});
+
+test("V2 plan validation rejects rank, source completeness, mint, disposition, and bound contradictions", () => {
+  const original = makePlanV2(validSnapshotRecordV2([100, 90, 80, 70], true), 2);
+  const corruptions = [
+    (plan) => { plan.candidateAuthorities[0].observedCandidateFrameRank = 2; },
+    (plan) => { plan.sourceHolder.candidateFrameCompleteness = "complete"; },
+    (plan) => { plan.mintAddress = key(99); },
+    (plan) => { plan.candidateAuthorities[0].plannedDisposition = { status: "not_selected" }; },
+    (plan) => { plan.maximumProviderRequests += 1; },
+  ];
+  for (const corrupt of corruptions) {
+    const plan = structuredClone(original);
+    corrupt(plan);
+    assert.throws(() => validateSolanaHistoricalQueryPlanV2(plan));
+  }
 });

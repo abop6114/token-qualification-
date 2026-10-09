@@ -1,6 +1,9 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
-const { selectSolanaHistoricalAuthorities } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { selectSolanaHistoricalAuthorities, selectSolanaHistoricalAuthoritiesV2 } = require("../dist/normalization/solanaHistoricalAuthoritySelector.js");
+const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/solanaHolderSnapshotComparison.js");
+const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
+const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
@@ -38,6 +41,32 @@ function holderStructure(balances, overrides = {}) {
 
 function selectedRanks(balances, cap) {
   return selectSolanaHistoricalAuthorities(holderStructure(balances), cap).selectedAuthorities.map((entry) => entry.sourceRank);
+}
+
+function snapshotRecordV2(balances, { partial = false, amountPartial = false } = {}) {
+  const tokenProgram = amountPartial ? "token-2022" : "spl-token";
+  const accounts = balances.map((balance, index) => {
+    const data = Buffer.alloc(165);
+    data.set(Buffer.alloc(32, 42), 0);
+    data.set(Buffer.alloc(32, index + 1), 32);
+    data.writeBigUInt64LE(BigInt(balance), 64);
+    data[108] = 1;
+    return {
+      address: key(index + 100), programOwner: SOLANA_TOKEN_PROGRAM_IDS[tokenProgram],
+      dataBase64: data.toString("base64"), reportedSpace: data.length,
+    };
+  });
+  const holder = normalizeSolanaHolderStructure({
+    mintAddress: MINT, tokenProgram, decimals: 6,
+    currentMintSupplyRaw: String(balances.reduce((sum, value) => sum + BigInt(value), 100n)),
+    mintExtensionTypes: amountPartial ? [4] : [], fetchedAt: "2026-10-01T12:00:00.000Z",
+    ...(partial
+      ? { acquisition: { status: "available", completeness: "partial", stopReason: "request_timeout", configuredMaxPages: 20, requestedPageSize: 5000, pages: [{ accounts, paginationKey: "2", contextSlot: 100 }] } }
+      : { pages: [{ accounts, paginationKey: null, contextSlot: 100 }] }),
+  });
+  return partial
+    ? createSolanaHolderSnapshotRecordV2(holder)
+    : createSolanaHolderSnapshotRecordV2(holder, { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 });
 }
 
 test("validates the configured cap as a positive safe integer", () => {
@@ -165,4 +194,51 @@ test("does not mutate the source holder structure", () => {
   const before = structuredClone(snapshot);
   selectSolanaHistoricalAuthorities(snapshot, 2);
   assert.deepEqual(snapshot, before);
+});
+
+test("V2 complete selection is methodologically equivalent to V1", () => {
+  const record = snapshotRecordV2([4, 100, 8, 32, 16, 64]);
+  const v1Structure = { ...record.snapshot, enumeration: { ...record.snapshot.enumeration, completeness: "complete" } };
+  const v1 = selectSolanaHistoricalAuthorities(v1Structure, 4);
+  const v2 = selectSolanaHistoricalAuthoritiesV2(record, 4);
+  assert.equal(v2.selectorVersion, "solana-rank-coverage-v2");
+  assert.equal(v2.sourceHolder.candidateFrameCompleteness, "complete");
+  assert.deepEqual(v2.selectedAuthorities.map(({ authorityAddress, balanceRaw, observedCandidateFrameRank, selectionPosition, selectionReason }) => ({
+    authorityAddress, balanceRaw, sourceRank: observedCandidateFrameRank, selectionPosition, selectionReason,
+  })), v1.selectedAuthorities);
+});
+
+test("V2 accepts partial immutable snapshots and labels ranks within the observed candidate frame", () => {
+  const record = snapshotRecordV2([7, 100, 7, 25, 50], { partial: true });
+  const before = structuredClone(record);
+  const result = selectSolanaHistoricalAuthoritiesV2(record, 3);
+  assert.equal(result.sourceHolder.candidateFrameCompleteness, "partial");
+  assert.equal(result.sourceHolder.enumeration.completeness, "partial");
+  assert.equal(result.sourceHolder.acquisition.stopReason, "request_timeout");
+  assert.equal(result.sourceHolder.candidateAuthorityCount, 5);
+  assert.equal(result.configuredMaximumSelectedAuthorityCount, 3);
+  assert.deepEqual(result.selectedAuthorities.map((item) => item.observedCandidateFrameRank), [0, 2, 4]);
+  assert.deepEqual(result.selectedAuthorities.map((item) => item.selectionPosition), [0, 1, 2]);
+  assert.ok(result.selectedAuthorities.every((item) => Object.hasOwn(item, "observedCandidateFrameRank") && !Object.hasOwn(item, "sourceRank")));
+  assert.equal(JSON.stringify(result).includes("global"), false);
+  assert.deepEqual(record, before);
+});
+
+test("V2 candidate frame is partial when amount coverage is partial even if enumeration completed", () => {
+  const record = snapshotRecordV2([10, 9], { amountPartial: true });
+  assert.equal(record.snapshot.enumeration.completeness, "complete");
+  assert.equal(record.snapshot.amountCoverage.state, "partial");
+  assert.equal(selectSolanaHistoricalAuthoritiesV2(record, 2).sourceHolder.candidateFrameCompleteness, "partial");
+});
+
+test("V2 selector rejects invalid snapshot IDs before ranking", () => {
+  const record = snapshotRecordV2([1]);
+  const tampered = { ...record, snapshotId: `sha256:${"0".repeat(64)}` };
+  assert.throws(() => selectSolanaHistoricalAuthoritiesV2(tampered, 1), /snapshot ID/);
+});
+
+test("V2 selector rejects duplicate candidate rows through the snapshot validator", () => {
+  const record = structuredClone(snapshotRecordV2([3, 2]));
+  record.snapshot.rawOwnerAuthorities[1].ownerAddress = record.snapshot.rawOwnerAuthorities[0].ownerAddress;
+  assert.throws(() => selectSolanaHistoricalAuthoritiesV2(record, 1), /duplicate owner authority/);
 });

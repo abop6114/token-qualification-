@@ -10,8 +10,9 @@ import {
   type HeliusHistoricalTransferPageFetcher,
 } from "../providers/solana/heliusHistoricalTransferAdapter";
 import type { SolanaHistoricalAmountEvidence, SolanaHistoricalAuthorityEvidence, SolanaHistoricalPageEvidence, SolanaHistoricalTransferObservation } from "../types/solanaHistoricalSampling";
-import type { SolanaHistoricalQueryPlan } from "../types/solanaHistoricalQueryPlan";
+import type { SolanaHistoricalQueryPlan, SolanaHistoricalQueryPlanV2, SolanaHistoricalQueryPlanVersioned } from "../types/solanaHistoricalQueryPlan";
 import { isSolanaPublicKeySyntax } from "../validation/solanaAddress";
+import { validateSolanaHistoricalQueryPlanV2 } from "../normalization/solanaHistoricalQueryPlan";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
@@ -38,7 +39,7 @@ export interface SolanaHistoricalExecutionTelemetry {
 
 export interface SolanaHistoricalQueryExecutionResult {
   /** The exact input plan; planning remains distinct from observed evidence. */
-  plan: SolanaHistoricalQueryPlan;
+  plan: SolanaHistoricalQueryPlanVersioned;
   evidence: import("../types/solanaHistoricalSampling").SolanaBoundedHistoricalSamplingEvidence;
   telemetry: SolanaHistoricalExecutionTelemetry;
 }
@@ -71,7 +72,7 @@ function safeProduct(left: number, right: number): number {
   return Number(product);
 }
 
-function assertPlan(plan: SolanaHistoricalQueryPlan): void {
+function assertPlanV1(plan: SolanaHistoricalQueryPlan): void {
   if (plan.planVersion !== "solana-bounded-history-query-plan-v1") throw new Error("Unsupported Solana historical query plan version.");
   if (!isSolanaPublicKeySyntax(plan.mintAddress)) throw new Error("Query plan mint address is malformed.");
   if (
@@ -162,6 +163,16 @@ function assertPlan(plan: SolanaHistoricalQueryPlan): void {
   ) {
     throw new Error("Query plan request or record bounds are inconsistent.");
   }
+}
+
+function assertPlanV2(plan: SolanaHistoricalQueryPlanV2): void {
+  validateSolanaHistoricalQueryPlanV2(plan);
+}
+
+function assertPlan(plan: SolanaHistoricalQueryPlanVersioned): void {
+  if (plan.planVersion === "solana-bounded-history-query-plan-v1") assertPlanV1(plan);
+  else if (plan.planVersion === "solana-bounded-history-query-plan-v2") assertPlanV2(plan);
+  else throw new Error("Unsupported Solana historical query plan version.");
 }
 
 function malformedResponse(message: string): HeliusTransferProviderError {
@@ -354,7 +365,7 @@ function emptyProviderErrorEvidence(
 }
 
 async function executeAuthority(
-  plan: SolanaHistoricalQueryPlan,
+  plan: SolanaHistoricalQueryPlanVersioned,
   authorityAddress: string,
   requestTimeoutMs: number,
   fetchPage: HeliusHistoricalTransferPageFetcher,
@@ -475,7 +486,7 @@ async function executeAuthority(
 }
 
 export async function executeSolanaHistoricalQueryPlan(
-  plan: SolanaHistoricalQueryPlan,
+  plan: SolanaHistoricalQueryPlanVersioned,
   options: ExecuteSolanaHistoricalQueryPlanOptions,
 ): Promise<SolanaHistoricalQueryExecutionResult> {
   assertPlan(plan);
@@ -545,9 +556,9 @@ export async function executeSolanaHistoricalQueryPlan(
     }
   }
   const endedAt = now();
-  const candidateSetCompleteness =
-    plan.sourceHolder.enumeration.completeness === "complete" &&
-    plan.sourceHolder.amountCoverage.state === "complete"
+  const candidateSetCompleteness = plan.planVersion === "solana-bounded-history-query-plan-v2"
+    ? plan.sourceHolder.candidateFrameCompleteness
+    : plan.sourceHolder.enumeration.completeness === "complete" && plan.sourceHolder.amountCoverage.state === "complete"
       ? "complete" as const
       : "partial" as const;
 

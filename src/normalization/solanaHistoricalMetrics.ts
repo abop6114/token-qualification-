@@ -1,5 +1,6 @@
 import type { SolanaHistoricalAuthorityEvidence, SolanaHistoricalTransferObservation } from "../types/solanaHistoricalSampling";
-import type { SolanaHistoricalQueryPlan } from "../types/solanaHistoricalQueryPlan";
+import type { SolanaHistoricalQueryPlan, SolanaHistoricalQueryPlanVersioned } from "../types/solanaHistoricalQueryPlan";
+import { validateSolanaHistoricalQueryPlanV2 } from "./solanaHistoricalQueryPlan";
 import type {
   SolanaHistoricalAuthorityMetrics,
   SolanaHistoricalAmountEvidenceProfile,
@@ -12,12 +13,14 @@ import type {
 import type { SolanaBoundedHistoricalSamplingEvidence } from "../types/solanaHistoricalSampling";
 
 function assertPlanEvidenceConsistency(
-  plan: SolanaHistoricalQueryPlan,
+  plan: SolanaHistoricalQueryPlanVersioned,
   evidence: SolanaBoundedHistoricalSamplingEvidence,
 ): void {
-  if (plan.planVersion !== "solana-bounded-history-query-plan-v1") {
-    throw new Error("Unsupported Solana historical query plan version.");
-  }
+  if (plan.planVersion === "solana-bounded-history-query-plan-v1") {
+    // Keep the existing V1 validation path and serialized semantics unchanged.
+  } else if (plan.planVersion === "solana-bounded-history-query-plan-v2") {
+    validateSolanaHistoricalQueryPlanV2(plan);
+  } else throw new Error("Unsupported Solana historical query plan version.");
   if (evidence.chain !== "solana" || plan.mintAddress !== evidence.mintAddress) {
     throw new Error("Historical query plan and evidence chain or mint do not match.");
   }
@@ -44,8 +47,9 @@ function assertPlanEvidenceConsistency(
   ) {
     throw new Error("Historical query plan and evidence execution bounds do not match.");
   }
-  const expectedCandidateCompleteness =
-    plan.sourceHolder.enumeration.completeness === "complete" && plan.sourceHolder.amountCoverage.state === "complete"
+  const expectedCandidateCompleteness = plan.planVersion === "solana-bounded-history-query-plan-v2"
+    ? plan.sourceHolder.candidateFrameCompleteness
+    : plan.sourceHolder.enumeration.completeness === "complete" && plan.sourceHolder.amountCoverage.state === "complete"
       ? "complete"
       : "partial";
   if (evidence.authorityScope.candidateSetCompleteness !== expectedCandidateCompleteness) {
@@ -474,7 +478,7 @@ function calculateAuthorityMetrics(authority: SolanaHistoricalAuthorityEvidence)
 }
 
 export function calculateSolanaHistoricalDescriptiveMetrics(
-  plan: SolanaHistoricalQueryPlan,
+  plan: SolanaHistoricalQueryPlanVersioned,
   evidence: SolanaBoundedHistoricalSamplingEvidence,
 ): SolanaHistoricalDescriptiveMetrics {
   assertPlanEvidenceConsistency(plan, evidence);
