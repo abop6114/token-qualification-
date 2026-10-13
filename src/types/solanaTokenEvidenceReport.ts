@@ -73,4 +73,3 @@ export interface SolanaTokenEvidenceReport {
   holders: EvidenceSection<SolanaHolderReportEvidence>;
   historicalTransactions: HistoricalEvidenceSection<SolanaHistoricalReportEvidence>;
 }
-

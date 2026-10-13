@@ -7,9 +7,9 @@
 ## 2. Current checkpoint
 
 - Branch: `main`
-- **Implementation checkpoint: `ef9bef2` — `feat: add bounded Solana transaction enrichment`.** `HEAD` and `origin/main` are synchronized at this checkpoint.
-- The repository was clean before this documentation refresh. The implementation checkpoint is `ef9bef2`; this documentation change is separate and does not alter that checkpoint.
-- Full-suite result reported at the implementation checkpoint: **555 tests passed, 0 failed**; `npm run build` and `git diff --check` passed. These are checkpoint-reported results and were not rerun during this documentation task.
+- **Implementation checkpoint: `2092256` — `Add callable Solana token evidence report service`.** `HEAD` and `origin/main` were synchronized at this checkpoint before this documentation/cleanup task.
+- The implementation checkpoint is `2092256`; this documentation and formatting change is separate and does not alter implementation behavior.
+- Full-suite result at this checkpoint: **692 tests passed, 0 failed**; `npm run build` passed. These results were rerun during the Phase 2F-3 closure task.
 - The project began as a Solana-first CLI/JSON prototype. Committed Base/Ethereum work is an evidence-feasibility extension; it is not EVM CLI/product integration.
 
 ## 3. Product objective
@@ -55,6 +55,17 @@ The committed Solana path includes:
 - Bounded Phase 2A structural transaction enrichment over signatures already present in validated historical evidence; this does not classify swaps, buys/sells, funding, or economic behavior.
 - Immutable holder snapshots, two-snapshot comparison, and multi-snapshot observed persistence evidence. Absence-to-zero is gated by complete evidence; captures do not imply continuous ownership.
 - Development-only Helius transfer-history and single-transaction feasibility probes remain separate from ordinary CLI behavior.
+
+### Phase 2F — callable Solana evidence report service
+
+- Phase 2F-1 integration and consumer reconnaissance: completed.
+- Phase 2F-2A and Phase 2F-2B internal consumer/report design: completed.
+- Phase 2F-2C-A report contract finalization: completed.
+- Phase 2F-2C-B1 mint and market provider-boundary hardening: completed at `4ccd7d5`.
+- Phase 2F-2C-B2 callable report service: completed at `2092256`.
+- Phase 2F-3 documentation and cleanup: current closing step.
+
+`generateSolanaTokenEvidenceReport` assembles existing mint, market, holder, and opt-in historical evidence for one Solana mint. It remains an internal callable service and is not exposed through the CLI, HTTP/API, or UI. It adds no scoring, recommendation, or AI interpretation. See `PHASE_2F_SOLANA_EVIDENCE_REPORT.md` for the implemented contract, section behavior, request bounds, and limitations. Phase 2F has no verified monthly cost or provider-credit measurement and does not establish production readiness.
 
 ### Phase 1A — bounded Solana holder acquisition
 
@@ -207,7 +218,7 @@ These are non-blocking design observations, not requests for immediate refactori
 
 ## 11. Validation and testing posture
 
-Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At Phase 2A implementation checkpoint `ef9bef2`, the reported full suite is **555 passing tests**; `npm run build` and `git diff --check` passed. These checkpoint-reported results were not rerun during this documentation task; `npm test` also runs the TypeScript build.
+Provider normalization and deterministic logic require regression tests before they are trusted. Adversarial tests should cover malformed, contradictory, partial, capped, and unavailable evidence—not only ordinary success fixtures. Normal review gates are `npm run build`, the full `npm test` suite, `git diff --check`, and whitespace checks for new files. At Phase 2F implementation checkpoint `2092256`, the full suite reported **692 passing tests**; `npm run build` passed. Phase 2F-3 reran the full suite and build; `npm test` also runs the TypeScript build.
 
 ## 12. Cost and operating constraints
 
@@ -215,7 +226,7 @@ Preserve Project Context V1 constraints: the normal development/early-beta opera
 
 Prefer progressive analysis, bounded queries and sampling, metric-specific caching/reuse, and per-provider usage/cost telemetry. Avoid unbounded per-wallet/signature fanout and unnecessary AI calls for objective facts. Public/beta precedes payment; actual cost and usage should inform later controls.
 
-Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Phase 2A adds at most **5 unique-signature `getTransaction` requests** per enrichment execution, sequentially, with zero retries; this bounds request fanout but does not itself prove the below-$200/month target or establish provider-credit pricing. Phase 1A/1B added no provider or data source, did not increase historical selection or per-authority page/record caps, and does not query additional historical authorities merely because holder enumeration is partial. Partial evidence changes provenance and interpretation, not historical query fanout. Solana token-account acquisition can still be relatively expensive, but is now explicitly bounded by the 20-page guardrail; the bound does not establish provider-wide or blockchain-wide completeness by itself.
+Targeted account or transaction investigation should remain bounded and belongs in later participation/forensic analysis where appropriate. Steps 5A, 5B-1, 5B-2, and 5B-3 added zero provider/API calls. Phase 2A adds at most **5 unique-signature `getTransaction` requests** per enrichment execution, sequentially, with zero retries; this bounds request fanout but does not itself prove the below-$200/month target or establish provider-credit pricing. Phase 1A/1B added no provider or data source, did not increase historical selection or per-authority page/record caps, and does not query additional historical authorities merely because holder enumeration is partial. Partial evidence changes provenance and interpretation, not historical query fanout. Solana token-account acquisition can still be relatively expensive, but is now explicitly bounded by the 20-page guardrail; the bound does not establish provider-wide or blockchain-wide completeness by itself. Phase 2F bounds its existing full-path acquisition to at most 29 requests under configured caps; this request count is not a credit or monthly-cost estimate.
 
 ## 13. Public presentation boundary
 
@@ -251,7 +262,7 @@ Cash Cat, Super Cat, and SANTA remain reference/validation cases only; they are 
 
 **Phase 2A — bounded Solana historical transaction enrichment: IMPLEMENTED at `ef9bef2`.** It fingerprints validated historical source evidence, selects up to five unique signatures deterministically, and sequentially acquires/normalizes internal structural transaction evidence under the request and completeness boundaries recorded above. It adds no trade, flow, holder-quality, or scoring conclusion.
 
-The next candidate is **Phase 2B focused reconnaissance for deterministic token balance-flow evidence**. Do not begin with coding. First settle the exact pre/post token-balance row pairing identity and uniqueness requirements; account-index and mint relationships; owner/program fields; unmatched rows and account creation/closure semantics; exact `BigInt` raw delta and decimal consistency rules; source-completeness requirements; Token-2022 implications; failed-transaction handling; and the boundary between balance deltas and economic interpretation. This reconnaissance does not pre-approve a methodology or implementation. Trading interpretation and protocol-aware trade decoding remain later separate work. No global transaction abstraction, EVM transaction normalization, CLI integration, or public raw transaction presentation is implied.
+**Phase 2F — callable Solana token evidence report service: IMPLEMENTED at `2092256`; documentation and cleanup are the current closing step.** The internal service assembles existing Solana mint, market, holder, and optional bounded historical evidence. It is not publicly exposed and does not implement qualification assessment, scoring, or AI interpretation. The detailed contract is recorded in `PHASE_2F_SOLANA_EVIDENCE_REPORT.md`. No subsequent phase or production-readiness claim is authorized by this checkpoint.
 
 ## 16. Development workflow
 
