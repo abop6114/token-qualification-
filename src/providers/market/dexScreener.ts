@@ -3,20 +3,58 @@ import type { RawMarketPoolObservation, MarketVolumeWindow } from "../../types/m
 const TOKEN_PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/";
 const VOLUME_WINDOWS: readonly MarketVolumeWindow[] = ["m5", "h1", "h6", "h24"];
 const DECIMAL_PATTERN = /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 type JsonObject = Record<string, unknown>;
+
+export const DEX_SCREENER_DEFAULT_TIMEOUT_MS = 30_000;
+
+export type DexScreenerProviderErrorCategory =
+  | "configuration_error"
+  | "request_timeout"
+  | "transport_error"
+  | "http_error"
+  | "malformed_response";
+
+const SAFE_MESSAGES: Record<DexScreenerProviderErrorCategory, string> = {
+  configuration_error: "DEX Screener request configuration is invalid.",
+  request_timeout: "DEX Screener request timed out.",
+  transport_error: "DEX Screener request failed.",
+  http_error: "DEX Screener HTTP request failed.",
+  malformed_response: "DEX Screener returned a malformed response.",
+};
+
+/** Sanitized provider-boundary failure; provider bodies and transport causes are discarded. */
+export class DexScreenerProviderError extends Error {
+  constructor(
+    readonly category: DexScreenerProviderErrorCategory,
+    readonly httpStatus: number | null = null,
+  ) {
+    super(SAFE_MESSAGES[category]);
+    this.name = "DexScreenerProviderError";
+  }
+
+  toJSON(): { name: string; category: DexScreenerProviderErrorCategory; message: string; httpStatus: number | null } {
+    return { name: this.name, category: this.category, message: this.message, httpStatus: this.httpStatus };
+  }
+}
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function optionalNumeric(value: unknown, field: string): string | number | null {
+function isFullDecimal(value: string): boolean {
+  // `$` may match before a final line terminator; trim equality closes that JavaScript regex edge case.
+  return value.trim() === value && DECIMAL_PATTERN.test(value);
+}
+
+function optionalNumeric(value: unknown): string | number | null {
   if (value === undefined || value === null) return null;
   if (
     (typeof value !== "string" && typeof value !== "number") ||
-    (typeof value === "string" && (!DECIMAL_PATTERN.test(value) || !Number.isFinite(Number(value)))) ||
+    (typeof value === "string" && (!isFullDecimal(value) || !Number.isFinite(Number(value)))) ||
     (typeof value === "number" && !Number.isFinite(value))
   ) {
-    throw new Error(`DEX Screener returned a malformed ${field} value.`);
+    throw new DexScreenerProviderError("malformed_response");
   }
   return value;
 }
@@ -24,39 +62,40 @@ function optionalNumeric(value: unknown, field: string): string | number | null 
 function optionalTimestamp(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0 || !Number.isFinite(new Date(value).getTime())) {
-    throw new Error("DEX Screener returned a malformed pair creation timestamp.");
+    throw new DexScreenerProviderError("malformed_response");
   }
   return value;
 }
 
+/** Validates and normalizes a DEX Screener token-pairs payload without provider access. */
 export function parseDexScreenerPairs(payload: unknown): RawMarketPoolObservation[] {
   if (!Array.isArray(payload)) {
-    throw new Error("DEX Screener returned a malformed token-pairs response.");
+    throw new DexScreenerProviderError("malformed_response");
   }
 
-  return payload.map((entry, index) => {
+  return payload.map((entry) => {
     if (!isObject(entry) || !isObject(entry.baseToken) || !isObject(entry.quoteToken)) {
-      throw new Error(`DEX Screener returned a malformed pool observation at index ${index}.`);
+      throw new DexScreenerProviderError("malformed_response");
     }
     const volume = entry.volume === undefined || entry.volume === null ? {} : entry.volume;
     const liquidity = entry.liquidity === undefined || entry.liquidity === null ? {} : entry.liquidity;
     if (!isObject(volume) || !isObject(liquidity)) {
-      throw new Error(`DEX Screener returned malformed pool metrics at index ${index}.`);
+      throw new DexScreenerProviderError("malformed_response");
     }
     const volumeUsd: Partial<Record<MarketVolumeWindow, string | number | null>> = {};
     for (const window of VOLUME_WINDOWS) {
       if (Object.prototype.hasOwnProperty.call(volume, window)) {
-        volumeUsd[window] = optionalNumeric(volume[window], `volume.${window}`);
+        volumeUsd[window] = optionalNumeric(volume[window]);
       }
     }
     const fields = ["chainId", "pairAddress", "dexId"] as const;
     for (const field of fields) {
       if (typeof entry[field] !== "string" || entry[field].length === 0) {
-        throw new Error(`DEX Screener returned a malformed ${field} at index ${index}.`);
+        throw new DexScreenerProviderError("malformed_response");
       }
     }
     if (typeof entry.baseToken.address !== "string" || typeof entry.quoteToken.address !== "string") {
-      throw new Error(`DEX Screener returned malformed token identities at index ${index}.`);
+      throw new DexScreenerProviderError("malformed_response");
     }
 
     return {
@@ -65,32 +104,57 @@ export function parseDexScreenerPairs(payload: unknown): RawMarketPoolObservatio
       dexId: entry.dexId as string,
       baseTokenAddress: entry.baseToken.address,
       quoteTokenAddress: entry.quoteToken.address,
-      priceUsd: optionalNumeric(entry.priceUsd, "priceUsd"),
-      marketCapUsd: optionalNumeric(entry.marketCap, "marketCap"),
-      fdvUsd: optionalNumeric(entry.fdv, "fdv"),
-      liquidityUsd: optionalNumeric(liquidity.usd, "liquidity.usd"),
+      priceUsd: optionalNumeric(entry.priceUsd),
+      marketCapUsd: optionalNumeric(entry.marketCap),
+      fdvUsd: optionalNumeric(entry.fdv),
+      liquidityUsd: optionalNumeric(liquidity.usd),
       volumeUsd,
       poolCreatedAt: optionalTimestamp(entry.pairCreatedAt),
     };
   });
 }
 
-export async function getSolanaMintMarkets(mintAddress: string): Promise<RawMarketPoolObservation[]> {
-  let response: Response;
-  try {
-    response = await fetch(`${TOKEN_PAIRS_URL}${encodeURIComponent(mintAddress)}`);
-  } catch {
-    throw new Error("DEX Screener request failed.");
-  }
-  if (!response.ok) {
-    throw new Error(`DEX Screener HTTP request failed (status ${response.status}).`);
+/** Retrieves one Solana mint market snapshot. A valid empty response remains []. */
+export async function getSolanaMintMarkets(
+  mintAddress: string,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = DEX_SCREENER_DEFAULT_TIMEOUT_MS,
+): Promise<RawMarketPoolObservation[]> {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw new DexScreenerProviderError("configuration_error");
   }
 
-  let payload: unknown;
+  const controller = new AbortController();
+  let timedOut = false;
+  // Abort cancels the underlying fetch; prompt settlement still depends on fetch honoring its signal.
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
   try {
-    payload = await response.json();
-  } catch {
-    throw new Error("DEX Screener returned malformed JSON.");
+    let response: Response;
+    try {
+      response = await fetchImpl(`${TOKEN_PAIRS_URL}${encodeURIComponent(mintAddress)}`, { signal: controller.signal });
+    } catch {
+      if (timedOut) throw new DexScreenerProviderError("request_timeout");
+      throw new DexScreenerProviderError("transport_error");
+    }
+
+    if (timedOut) throw new DexScreenerProviderError("request_timeout");
+    if (!response.ok) throw new DexScreenerProviderError("http_error", response.status);
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      if (timedOut) throw new DexScreenerProviderError("request_timeout");
+      throw new DexScreenerProviderError("malformed_response");
+    }
+
+    if (timedOut) throw new DexScreenerProviderError("request_timeout");
+    return parseDexScreenerPairs(payload);
+  } finally {
+    clearTimeout(timeout);
   }
-  return parseDexScreenerPairs(payload);
 }

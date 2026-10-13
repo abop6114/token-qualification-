@@ -171,9 +171,24 @@ test("pool creation time is distinct from token creation age and lifecycle remai
 });
 
 test("malformed numeric provider data is rejected instead of normalized as missing", () => {
-  assert.throws(() => parseDexScreenerPairs([pairResponse({ priceUsd: "NaN" })]), /malformed priceUsd/);
-  assert.throws(() => parseDexScreenerPairs([pairResponse({ volume: { h24: Infinity } })]), /malformed volume.h24/);
-  assert.throws(() => parseDexScreenerPairs({}), /malformed token-pairs response/);
+  assert.throws(() => parseDexScreenerPairs([pairResponse({ priceUsd: "NaN" })]), { category: "malformed_response" });
+  assert.throws(() => parseDexScreenerPairs([pairResponse({ volume: { h24: Infinity } })]), { category: "malformed_response" });
+  assert.throws(() => parseDexScreenerPairs({}), { category: "malformed_response" });
+  assert.throws(() => parseDexScreenerPairs([pairResponse({ priceUsd: "1\n" })]), { category: "malformed_response" });
+});
+
+test("accepts only the established unsigned decimal string grammar", () => {
+  for (const value of ["0", "12", "12.5", ".5", "12.", "1e3", "1.2E-3"]) {
+    assert.equal(parseDexScreenerPairs([pairResponse({ priceUsd: value })])[0].priceUsd, value);
+  }
+
+  for (const value of ["1\n", "1\r\n", "1abc", " 1", "1 ", "NaN", "Infinity"]) {
+    assert.throws(
+      () => parseDexScreenerPairs([pairResponse({ priceUsd: value })]),
+      { category: "malformed_response" },
+      `expected ${JSON.stringify(value)} to be rejected`,
+    );
+  }
 });
 
 test("base-side mint uses quote token as counter token and keeps token-oriented metrics", () => {
