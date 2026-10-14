@@ -9,6 +9,7 @@ const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { createSolanaHistoricalTransactionSelection, validateSolanaHistoricalTransactionSelection } = require("../dist/normalization/solanaHistoricalTransactionSelector.js");
 const { executeSolanaTransactionEnrichment } = require("../dist/execution/solanaTransactionEnrichment.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
+const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
 
 const key = (n) => encodeSolanaPublicKey(Buffer.alloc(32, n));
 const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -425,4 +426,29 @@ test("input selection, plan, and historical evidence are not mutated", async () 
     await executeSolanaTransactionEnrichment(selection, plan, evidence, { fetchImpl: async () => rpc(transactionFor(s)) });
     assert.equal(JSON.stringify([plan, evidence, selection]), before);
   });
+
+test("caller cancellation during transaction enrichment is not converted into provider evidence", async () => {
+  await withKey(async () => {
+    const plan = makePlan();
+    const authority = plan.candidateAuthorities[0].authorityAddress;
+    const signature = sig(88);
+    const { evidence, selection } = await sourceFor(plan, new Map([[authority, [transfer(signature, 0)]]]));
+    const controller = new AbortController();
+    let calls = 0;
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    const operation = executeSolanaTransactionEnrichment(selection, plan, evidence, {
+      signal: controller.signal,
+      fetchImpl: async (_url, init) => {
+        calls += 1;
+        markStarted();
+        return await new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+      },
+    });
+    await started;
+    controller.abort();
+    await assert.rejects(operation, SolanaExecutionCancelledError);
+    assert.equal(calls, 1);
+  });
+});
 });

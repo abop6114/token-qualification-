@@ -30,7 +30,7 @@ const opDetails = {
   getTransaction: ["helius", "transaction_enrichment"],
 };
 
-function request(sequence, operation, outcome = "accepted", responseReceived = outcome !== "transport_error") {
+function request(sequence, operation, outcome = "accepted", responseReceived = outcome !== "transport_error" && outcome !== "request_cancelled") {
   const [provider, section] = opDetails[operation];
   return {
     requestSequence: sequence, section, provider, operation, requestAttempted: true,
@@ -375,4 +375,23 @@ test("dependency-only and incomplete instrumentation do not fabricate requests o
   const partialResult = run([], partialStages);
   assert.equal(partialResult.counts.attemptedRequestCount, 0);
   assert.equal(partialResult.requestObservationCoverage, "partial");
+});
+
+test("cancellation observations are counted separately from failures and timeouts", () => {
+  const requests = [request(1, "getAccountInfo", "request_cancelled", false)];
+  const stages = stagesFor(requests);
+  stages[0] = stage("mint_acquisition", {
+    outcome: "failed", reasonCode: "caller_cancelled", acquisitionDisposition: "partial",
+    requestObservationCoverage: { status: "complete" },
+  });
+  const result = run(requests, stages);
+  assert.deepEqual({
+    attempted: result.counts.attemptedRequestCount,
+    responses: result.counts.responseReceivedCount,
+    accepted: result.counts.acceptedOperationCount,
+    failed: result.counts.failedOperationCount,
+    timeouts: result.counts.timeoutCount,
+    cancelled: result.counts.cancelledOperationCount,
+    sectionCancelled: result.counts.bySection.mint.cancelledOperationCount,
+  }, { attempted: 1, responses: 0, accepted: 0, failed: 0, timeouts: 0, cancelled: 1, sectionCancelled: 1 });
 });

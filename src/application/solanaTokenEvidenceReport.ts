@@ -54,6 +54,8 @@ import { HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS } from "../providers/solana/heliusRpc
 import { DEX_SCREENER_DEFAULT_TIMEOUT_MS } from "../providers/market/dexScreener";
 import { HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS } from "../providers/solana/heliusTransaction";
 import { getHeliusHistoricalTransferPage } from "../providers/solana/heliusHistoricalTransferAdapter";
+import { throwIfSolanaExecutionCancelled } from "../types/solanaTrustedExecutionContext";
+import type { SolanaTrustedExecutionContext } from "../types/solanaTrustedExecutionContext";
 
 export type SolanaTokenEvidenceReportRequestErrorReason =
   | "invalid_chain"
@@ -72,11 +74,12 @@ export class SolanaTokenEvidenceReportRequestError extends Error {
 }
 
 export interface SolanaTokenEvidenceReportDependencies {
-  getAccount: (address: string) => Promise<RawSolanaAccount | null>;
-  getMarkets: (mintAddress: string) => Promise<RawMarketPoolObservation[]>;
+  getAccount: (address: string, signal?: AbortSignal) => Promise<RawSolanaAccount | null>;
+  getMarkets: (mintAddress: string, signal?: AbortSignal) => Promise<RawMarketPoolObservation[]>;
   getTokenAccountPages: (
     mintAddress: string,
     tokenProgram: SolanaResolvedMint["tokenProgram"],
+    signal?: AbortSignal,
   ) => Promise<SolanaTokenAccountAcquisitionResult>;
   fetchHistoricalPage?: HeliusHistoricalTransferPageFetcher;
   fetchTransaction?: typeof fetch;
@@ -104,9 +107,9 @@ export class SolanaTokenEvidenceReportTelemetryError extends Error {
 }
 
 const DEFAULT_DEPENDENCIES: Pick<SolanaTokenEvidenceReportDependencies, "getAccount" | "getMarkets" | "getTokenAccountPages"> = {
-  getAccount: getSolanaAccount,
-  getMarkets: getSolanaMintMarkets,
-  getTokenAccountPages: getSolanaTokenAccountPages,
+  getAccount: (address) => getSolanaAccount(address),
+  getMarkets: (mintAddress) => getSolanaMintMarkets(mintAddress),
+  getTokenAccountPages: (mintAddress, tokenProgram) => getSolanaTokenAccountPages(mintAddress, tokenProgram),
 };
 
 const HISTORICAL_LIMITS = {
@@ -358,7 +361,9 @@ async function generateHistoricalEvidence(
   now: () => Date,
   collector?: ReportTelemetryCollector,
   telemetryOptions: SolanaTokenEvidenceReportTelemetryOptions = {},
+  context?: SolanaTrustedExecutionContext,
 ): Promise<SolanaHistoricalReportEvidence> {
+  throwIfSolanaExecutionCancelled(context);
   const planningStart = collector?.start("historical_selection_and_planning", "historical_acquisition");
   let authoritySelection: SolanaHistoricalAuthoritySelectionV2;
   let queryPlan: SolanaHistoricalQueryPlanV2;
@@ -372,6 +377,7 @@ async function generateHistoricalEvidence(
       maxRecordsPerAuthority: HISTORICAL_LIMITS.maxRecordsPerAuthority,
     });
     if (collector && planningStart) collector.finish(planningStart, "historical_acquisition", "completed", null, null, collector.completedApplicationCoverage());
+    throwIfSolanaExecutionCancelled(context);
   } catch (error: unknown) {
     if (collector && planningStart) collector.finish(planningStart, "historical_acquisition", "failed", "unexpected_application_failure", null, collector.completedApplicationCoverage());
     throw error;
@@ -383,14 +389,20 @@ async function generateHistoricalEvidence(
     requestTimeoutMs: HISTORICAL_LIMITS.requestTimeoutMs,
     ...(builtInPageAdapter
       ? {
-          fetchPage: (input, timeoutMs, observationContext) => getHeliusHistoricalTransferPage(
-            input, timeoutMs, telemetryOptions.fetchImpl ?? fetch, observationContext,
+          fetchPage: (input, timeoutMs, observationContext, signal) => getHeliusHistoricalTransferPage(
+            input, timeoutMs, telemetryOptions.fetchImpl ?? fetch, observationContext, signal,
           ),
         }
-      : { fetchPage: dependencies.fetchHistoricalPage }),
+      : {
+          fetchPage: (input, timeoutMs, observationContext, signal) => dependencies.fetchHistoricalPage!(
+            input, timeoutMs, observationContext, signal,
+          ),
+        }),
     ...(collector === undefined ? {} : { requestObservationContext: collector.context }),
     now: () => now().getTime(),
+    ...(context?.signal === undefined ? {} : { signal: context.signal }),
   });
+  throwIfSolanaExecutionCancelled(context);
   if (collector && pageStart) {
     const selectedCount = queryPlan.selectedAuthorityCount;
     const authorities = historicalExecution.evidence.authorities.filter((authority) => authority.queryStatus !== "not_queried");
@@ -417,9 +429,11 @@ async function generateHistoricalEvidence(
   let descriptiveMetrics: SolanaHistoricalReportEvidence["descriptiveMetrics"];
   let transactionSelection: SolanaHistoricalTransactionSelectionEvidence;
   try {
+    throwIfSolanaExecutionCancelled(context);
     descriptiveMetrics = calculateSolanaHistoricalDescriptiveMetrics(queryPlan, historicalExecution.evidence);
     transactionSelection = createSolanaHistoricalTransactionSelection(queryPlan, historicalExecution.evidence);
     if (collector && metricsStart) collector.finish(metricsStart, "historical_acquisition", "completed", null, null, collector.completedApplicationCoverage());
+    throwIfSolanaExecutionCancelled(context);
   } catch (error: unknown) {
     if (collector && metricsStart) collector.finish(metricsStart, "historical_acquisition", "failed", "unexpected_application_failure", null, collector.completedApplicationCoverage());
     throw error;
@@ -436,8 +450,10 @@ async function generateHistoricalEvidence(
       now,
       fetchImpl: dependencies.fetchTransaction ?? telemetryOptions.fetchImpl ?? fetch,
       ...(collector === undefined ? {} : { requestObservationContext: collector.context }),
+      ...(context?.signal === undefined ? {} : { signal: context.signal }),
     },
   );
+  throwIfSolanaExecutionCancelled(context);
   if (collector && transactionStart) {
     const telem = transactionEnrichment.telemetry;
     const requestFailures = telem.providerErrorCount + telem.requestTimeoutCount + telem.malformedResponseCount;
@@ -490,8 +506,10 @@ async function generateSolanaTokenEvidenceReportInternal(
   injected: Partial<SolanaTokenEvidenceReportDependencies>,
   collector?: ReportTelemetryCollector,
   telemetryOptions: SolanaTokenEvidenceReportTelemetryOptions = {},
+  context?: SolanaTrustedExecutionContext,
 ): Promise<SolanaTokenEvidenceReport> {
   validateRequest(request);
+  throwIfSolanaExecutionCancelled(context);
   const dependencies: SolanaTokenEvidenceReportDependencies = { ...DEFAULT_DEPENDENCIES, ...injected };
   const now = dependencies.now ?? (() => new Date());
 
@@ -500,9 +518,11 @@ async function generateSolanaTokenEvidenceReportInternal(
   let mintAccount: RawSolanaAccount | null;
   const mintAcquisitionStart = collector?.start("mint_acquisition", "mint");
   try {
-    mintAccount = injected.getAccount === undefined && collector !== undefined
-      ? await getSolanaAccount(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS, collector.context)
-      : await dependencies.getAccount(request.assetAddress);
+    throwIfSolanaExecutionCancelled(context);
+    mintAccount = injected.getAccount === undefined
+      ? await getSolanaAccount(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal)
+      : await dependencies.getAccount(request.assetAddress, context?.signal);
+    throwIfSolanaExecutionCancelled(context);
     if (collector && mintAcquisitionStart) {
       const coverage = collector.requestCoverage(mintAcquisitionStart, "mint", injected.getAccount === undefined, true);
       collector.finish(mintAcquisitionStart, "mint", "completed", null, "complete", coverage);
@@ -515,7 +535,9 @@ async function generateSolanaTokenEvidenceReportInternal(
     }
     if (!(error instanceof SolanaAccountProviderError)) throw error;
     if (collector) recordSkippedAfterMintResolution(collector, request.historicalTransactions.status);
-    return makeMintFailureReport(request, now, error.category);
+    const report = makeMintFailureReport(request, now, error.category);
+    throwIfSolanaExecutionCancelled(context);
+    return report;
   }
 
   const mintNormalizationStart = collector?.start("mint_normalization", "mint");
@@ -531,7 +553,7 @@ async function generateSolanaTokenEvidenceReportInternal(
 
   if (!resolution.exists || !resolution.isMint) {
     if (collector) recordSkippedAfterMintResolution(collector, request.historicalTransactions.status);
-    return {
+    const report: SolanaTokenEvidenceReport = {
       schemaVersion: SOLANA_TOKEN_EVIDENCE_REPORT_SCHEMA_VERSION,
       chain: "solana",
       assetAddress: request.assetAddress,
@@ -543,6 +565,8 @@ async function generateSolanaTokenEvidenceReportInternal(
         ? { status: "not_requested" }
         : notAttempted("mint_unresolved"),
     };
+    throwIfSolanaExecutionCancelled(context);
+    return report;
   }
 
   let market: EvidenceSection<Awaited<ReturnType<typeof normalizeMarketSnapshot>>> = notAttempted("mint_unresolved");
@@ -550,9 +574,11 @@ async function generateSolanaTokenEvidenceReportInternal(
   let marketObservations: RawMarketPoolObservation[] | undefined;
   let marketAcquired = false;
   try {
-    marketObservations = injected.getMarkets === undefined && collector !== undefined
-      ? await getSolanaMintMarkets(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, DEX_SCREENER_DEFAULT_TIMEOUT_MS, collector.context)
-      : await dependencies.getMarkets(request.assetAddress);
+    throwIfSolanaExecutionCancelled(context);
+    marketObservations = injected.getMarkets === undefined
+      ? await getSolanaMintMarkets(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, DEX_SCREENER_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal)
+      : await dependencies.getMarkets(request.assetAddress, context?.signal);
+    throwIfSolanaExecutionCancelled(context);
     marketAcquired = true;
     if (collector && marketAcquisitionStart) {
       collector.finish(marketAcquisitionStart, "market", "completed", null, "complete",
@@ -585,9 +611,11 @@ async function generateSolanaTokenEvidenceReportInternal(
   }
 
   const holderAcquisitionStart = collector?.start("holder_acquisition", "holders");
-  const acquisition = injected.getTokenAccountPages === undefined && collector !== undefined
-    ? await getSolanaTokenAccountPages(request.assetAddress, resolution.tokenProgram, telemetryOptions.fetchImpl ?? fetch, HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS, collector.context)
-    : await dependencies.getTokenAccountPages(request.assetAddress, resolution.tokenProgram);
+  throwIfSolanaExecutionCancelled(context);
+  const acquisition = injected.getTokenAccountPages === undefined
+    ? await getSolanaTokenAccountPages(request.assetAddress, resolution.tokenProgram, telemetryOptions.fetchImpl ?? fetch, HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal)
+    : await dependencies.getTokenAccountPages(request.assetAddress, resolution.tokenProgram, context?.signal);
+  throwIfSolanaExecutionCancelled(context);
   if (collector && holderAcquisitionStart) {
     const unavailable = acquisition.status === "unavailable";
     const configurationFailure = unavailable && acquisition.reason === "configuration_error";
@@ -673,13 +701,14 @@ async function generateSolanaTokenEvidenceReportInternal(
       collector.recordNotRun("phase2e_integration", "historical_acquisition", "holder_evidence_unavailable");
     }
   } else {
+    throwIfSolanaExecutionCancelled(context);
     historicalTransactions = {
       status: "present",
-      evidence: await generateHistoricalEvidence(request.historicalTransactions, holders.evidence.snapshotRecord, dependencies, now, collector, telemetryOptions),
+      evidence: await generateHistoricalEvidence(request.historicalTransactions, holders.evidence.snapshotRecord, dependencies, now, collector, telemetryOptions, context),
     };
   }
 
-  return {
+  const report: SolanaTokenEvidenceReport = {
     schemaVersion: SOLANA_TOKEN_EVIDENCE_REPORT_SCHEMA_VERSION,
     chain: "solana",
     assetAddress: request.assetAddress,
@@ -689,14 +718,17 @@ async function generateSolanaTokenEvidenceReportInternal(
     holders,
     historicalTransactions,
   };
+  throwIfSolanaExecutionCancelled(context);
+  return report;
 }
 
 /** Existing evidence-only API; its return shape and execution path remain unchanged. */
 export async function generateSolanaTokenEvidenceReport(
   request: GenerateSolanaTokenEvidenceReportRequest,
   injected: Partial<SolanaTokenEvidenceReportDependencies> = {},
+  context?: SolanaTrustedExecutionContext,
 ): Promise<SolanaTokenEvidenceReport> {
-  return generateSolanaTokenEvidenceReportInternal(request, injected);
+  return generateSolanaTokenEvidenceReportInternal(request, injected, undefined, {}, context);
 }
 
 /**
@@ -708,11 +740,12 @@ export async function generateSolanaTokenEvidenceReportWithTelemetry(
   request: GenerateSolanaTokenEvidenceReportRequest,
   injected: Partial<SolanaTokenEvidenceReportDependencies> = {},
   options: SolanaTokenEvidenceReportTelemetryOptions = {},
+  context?: SolanaTrustedExecutionContext,
 ): Promise<SolanaTokenEvidenceReportWithTelemetry> {
   validateRequest(request);
   const collector = new ReportTelemetryCollector(options);
   const startedAt = collector.now();
-  const report = await generateSolanaTokenEvidenceReportInternal(request, injected, collector, options);
+  const report = await generateSolanaTokenEvidenceReportInternal(request, injected, collector, options, context);
   const endedAt = collector.now();
   const reportElapsedMs = startedAt !== null && endedAt !== null && endedAt >= startedAt
     ? endedAt - startedAt

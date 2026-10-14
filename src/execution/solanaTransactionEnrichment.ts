@@ -8,6 +8,7 @@ import type { SolanaHistoricalQueryPlanVersioned } from "../types/solanaHistoric
 import type { SolanaHistoricalTransactionSelectionEvidence } from "../types/solanaHistoricalTransactionSelection";
 import type { SolanaTransactionRequestProvenance } from "../types/solanaTransactionEvidence";
 import type { SolanaTransactionEnrichmentAcquisition, SolanaTransactionEnrichmentExecutionResult, SolanaTransactionEnrichmentCandidateResult } from "../types/solanaTransactionEnrichment";
+import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../types/solanaTrustedExecutionContext";
 
 export interface ExecuteSolanaTransactionEnrichmentOptions {
   fetchImpl?: typeof fetch;
@@ -15,6 +16,7 @@ export interface ExecuteSolanaTransactionEnrichmentOptions {
   /** Optional report-local observations passed to the provider fetch boundary. */
   requestObservationContext?: SolanaProviderRequestObservationContext;
   now?: () => Date;
+  signal?: AbortSignal;
 }
 
 function elapsedMs(start: number): number {
@@ -58,6 +60,7 @@ export async function executeSolanaTransactionEnrichment(
   options: ExecuteSolanaTransactionEnrichmentOptions = {},
 ): Promise<SolanaTransactionEnrichmentExecutionResult> {
   validateSolanaHistoricalTransactionSelection(selection, plan, historicalEvidence);
+  throwIfSolanaExecutionCancelled(options.signal === undefined ? undefined : { signal: options.signal });
   const started = performance.now();
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -78,6 +81,7 @@ export async function executeSolanaTransactionEnrichment(
   const results: SolanaTransactionEnrichmentCandidateResult[] = [];
 
   for (const candidate of selection.candidates) {
+    throwIfSolanaExecutionCancelled(options.signal === undefined ? undefined : { signal: options.signal });
     if (candidate.disposition.status === "not_selected") {
       results.push({ signature: candidate.signature, sourceObservations: candidate.sourceObservations,
         disposition: candidate.disposition, acquisition: { status: "not_attempted" }, normalization: { status: "not_attempted" } });
@@ -90,8 +94,9 @@ export async function executeSolanaTransactionEnrichment(
     const source = provenance(candidate.signature, now().toISOString());
     let acquired: Awaited<ReturnType<typeof getHeliusTransaction>>;
     try {
-      acquired = await getHeliusTransaction(candidate.signature, countedFetch, timeoutMs, options.requestObservationContext);
+      acquired = await getHeliusTransaction(candidate.signature, countedFetch, timeoutMs, options.requestObservationContext, options.signal);
     } catch (error: unknown) {
+      if (error instanceof SolanaExecutionCancelledError) throw error;
       if (error instanceof HeliusTransactionProviderError) {
         const acquisition = safeProviderFailure(error, source);
         if (acquisition.status === "request_timeout") requestTimeoutCount += 1;

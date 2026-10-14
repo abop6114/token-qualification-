@@ -447,3 +447,21 @@ test("partial V2 candidate scope remains partial when every selected query compl
   assert.equal(result.telemetry.requestCount, 2);
   assert.equal(result.telemetry.selectedAuthorityCount, 2);
 });
+
+test("caller cancellation after one accepted history page prevents a subsequent page request", async () => {
+  const plan = makePlan([100, 90], 1);
+  const controller = new AbortController();
+  let calls = 0;
+  await assert.rejects(executeSolanaHistoricalQueryPlan(plan, {
+    requestTimeoutMs: 5_000,
+    now: fixedClock,
+    signal: controller.signal,
+    fetchPage: async (_request, _timeoutMs, _observationContext, signal) => {
+      calls += 1;
+      assert.equal(signal, controller.signal);
+      controller.abort();
+      return { observations: [transfer("before-cancel", integerStringAmount("7"))], paginationToken: CURSOR };
+    },
+  }), (error) => error.name === "SolanaExecutionCancelledError");
+  assert.equal(calls, 1);
+});

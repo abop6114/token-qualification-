@@ -24,7 +24,8 @@ export type SolanaTelemetryRequestOutcome =
   | "rpc_error"
   | "malformed_response"
   | "transport_error"
-  | "request_timeout";
+  | "request_timeout"
+  | "request_cancelled";
 
 export type SolanaTelemetryApplicationStage =
   | "mint_acquisition"
@@ -58,7 +59,8 @@ export type SolanaTelemetrySafeReasonCode =
   | "dependency_not_instrumented"
   | "prerequisite_not_met"
   | "observer_failure"
-  | "instrumentation_incomplete";
+  | "instrumentation_incomplete"
+  | "caller_cancelled";
 
 /** V1 deliberately reports neither provider credits nor monetary cost. */
 export interface SolanaTelemetryProviderUsageUnknown {
@@ -101,6 +103,11 @@ export type SolanaProviderRequestObservation =
       /** A timeout is not a cancellation guarantee; the response may or may not have arrived. */
       outcome: "request_timeout";
       responseReceived: boolean;
+    })
+  | (SolanaProviderRequestObservationBase & {
+      /** Trusted caller cancellation is distinct from provider transport failure and timeout. */
+      outcome: "request_cancelled";
+      responseReceived: boolean;
     });
 
 export type SolanaStageRequestObservationCoverage =
@@ -132,6 +139,7 @@ export interface SolanaTelemetrySectionCounts {
   acceptedOperationCount: number;
   failedOperationCount: number;
   timeoutCount: number;
+  cancelledOperationCount: number;
 }
 
 export type SolanaTelemetrySectionCountMap = Record<SolanaTelemetryReportSection, SolanaTelemetrySectionCounts>;
@@ -156,6 +164,7 @@ export interface SolanaReportOperationalTelemetry {
     acceptedOperationCount: number;
     failedOperationCount: number;
     timeoutCount: number;
+    cancelledOperationCount: number;
     bySection: SolanaTelemetrySectionCountMap;
   };
   reportElapsedMs: number | null;

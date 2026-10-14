@@ -31,7 +31,7 @@ export interface SolanaProviderRequestIdentity {
   operation: SolanaTelemetryProviderOperation;
 }
 
-type ErrorOutcomeClassifier = (error: unknown, responseReceived: boolean) => SolanaTelemetryRequestOutcome;
+type ErrorOutcomeClassifier = (error: unknown, responseReceived: boolean) => SolanaTelemetryRequestOutcome | null;
 
 function isContext(value: unknown): value is SolanaProviderRequestObservationContext {
   if (typeof value !== "object" || value === null) return false;
@@ -72,7 +72,8 @@ function safeClock(context: SolanaProviderRequestObservationContext): number | n
 
 function isOutcome(value: unknown): value is SolanaTelemetryRequestOutcome {
   return value === "accepted" || value === "http_error" || value === "rpc_error" ||
-    value === "malformed_response" || value === "transport_error" || value === "request_timeout";
+    value === "malformed_response" || value === "transport_error" || value === "request_timeout" ||
+    value === "request_cancelled";
 }
 
 function outcomeMatchesResponse(outcome: SolanaTelemetryRequestOutcome, responseReceived: boolean): boolean {
@@ -80,7 +81,7 @@ function outcomeMatchesResponse(outcome: SolanaTelemetryRequestOutcome, response
     return responseReceived;
   }
   if (outcome === "transport_error") return !responseReceived;
-  return outcome === "request_timeout";
+  return outcome === "request_timeout" || outcome === "request_cancelled";
 }
 
 /**
@@ -124,7 +125,9 @@ export async function observeProviderRequest<T>(
     if (context !== undefined && isContext(context) && sequence !== null) {
       try {
         const classified = classifyError(error, responseReceived);
-        if (isOutcome(classified) && outcomeMatchesResponse(classified, responseReceived)) terminalOutcome.value = classified;
+        if (classified === null) {
+          // A pre-invocation cancellation has no provider-attempt observation.
+        } else if (isOutcome(classified) && outcomeMatchesResponse(classified, responseReceived)) terminalOutcome.value = classified;
         else notifyLimitation(context, "invalid_terminal_classification");
       } catch {
         notifyLimitation(context, "invalid_terminal_classification");
@@ -150,6 +153,8 @@ export async function observeProviderRequest<T>(
       let observation: SolanaProviderRequestObservation | null = null;
       if (finalOutcome === "request_timeout") {
         observation = { ...base, responseReceived, outcome: "request_timeout" };
+      } else if (finalOutcome === "request_cancelled") {
+        observation = { ...base, responseReceived, outcome: "request_cancelled" };
       } else if (responseReceived && finalOutcome === "accepted") {
         observation = { ...base, responseReceived: true, outcome: "accepted" };
       } else if (responseReceived && (

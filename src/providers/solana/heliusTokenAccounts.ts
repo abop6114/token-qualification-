@@ -8,6 +8,8 @@ import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../../types/solana"
 import { HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS } from "./heliusTransaction";
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 import type { SolanaTelemetryRequestOutcome } from "../../types/solanaReportOperationalTelemetry";
+import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../../types/solanaTrustedExecutionContext";
+import { createSolanaRequestAbortScope } from "./solanaRequestAbortScope";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "token-accounts";
@@ -63,42 +65,48 @@ async function requestPage(
   timeoutMs: number,
   programId: string,
   observationContext?: SolanaProviderRequestObservationContext,
+  callerSignal?: AbortSignal,
 ): Promise<RawSolanaTokenAccountPage> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
+  const scope = createSolanaRequestAbortScope(timeoutMs, callerSignal);
+  let requestInvoked = false;
   try {
     return await observeProviderRequest(
       observationContext,
       { section: "holders", provider: "helius", operation: "getProgramAccountsV2" },
       async () => {
+        if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        requestInvoked = true;
         try {
           return await fetchImpl(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            signal: controller.signal,
+            signal: scope.signal,
             body: requestBody,
           });
-        } catch {
+        } catch (error: unknown) {
+          if (scope.isCallerAbort(error)) throw new SolanaExecutionCancelledError(requestInvoked);
           throw new PageRequestFailure(
-            controller.signal.aborted ? "request_timeout" : "provider_error",
-            controller.signal.aborted ? "request_timeout" : "transport_error",
+            scope.isTimedOut() ? "request_timeout" : "provider_error",
+            scope.isTimedOut() ? "request_timeout" : "transport_error",
           );
         }
       },
       async (response) => {
-        if (controller.signal.aborted) throw new PageRequestFailure("request_timeout", "request_timeout");
+        if (scope.isTimedOut()) throw new PageRequestFailure("request_timeout", "request_timeout");
         if (!response.ok) throw new PageRequestFailure("provider_error", "http_error");
 
         let payload: unknown;
         try {
           payload = await response.json();
-        } catch {
+        } catch (error: unknown) {
+          if (scope.isCallerAbort(error)) throw new SolanaExecutionCancelledError(requestInvoked);
           throw new PageRequestFailure(
-            controller.signal.aborted ? "request_timeout" : "malformed_response",
-            controller.signal.aborted ? "request_timeout" : "malformed_response",
+            scope.isTimedOut() ? "request_timeout" : "malformed_response",
+            scope.isTimedOut() ? "request_timeout" : "malformed_response",
           );
         }
-        if (controller.signal.aborted) throw new PageRequestFailure("request_timeout", "request_timeout");
+        if (scope.isTimedOut()) throw new PageRequestFailure("request_timeout", "request_timeout");
 
         if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
           throw new PageRequestFailure("malformed_response", "malformed_response");
@@ -136,18 +144,20 @@ async function requestPage(
         return { accounts, paginationKey: page.paginationKey as string | null, contextSlot: contextSlot as number };
       },
       (error, responseReceived) => {
+        if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
         if (error instanceof PageRequestFailure) return error.observationOutcome;
         return responseReceived ? "malformed_response" : "transport_error";
       },
     );
   } catch (error: unknown) {
+    if (error instanceof SolanaExecutionCancelledError) throw error;
     if (error instanceof PageRequestFailure) throw error;
     throw new PageRequestFailure(
-      controller.signal.aborted ? "request_timeout" : "provider_error",
-      controller.signal.aborted ? "request_timeout" : "transport_error",
+      scope.isTimedOut() ? "request_timeout" : "provider_error",
+      scope.isTimedOut() ? "request_timeout" : "transport_error",
     );
   } finally {
-    clearTimeout(timeout);
+    scope.dispose();
   }
 }
 
@@ -183,7 +193,9 @@ export async function getSolanaTokenAccountPages(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
+  callerSignal?: AbortSignal,
 ): Promise<SolanaTokenAccountAcquisitionResult> {
+  throwIfSolanaExecutionCancelled(callerSignal === undefined ? undefined : { signal: callerSignal });
   if (!isSolanaPublicKeySyntax(mintAddress)) {
     throw new Error("A resolved Solana mint address is required for token-account enumeration.");
   }
@@ -202,6 +214,7 @@ export async function getSolanaTokenAccountPages(
   let cursor: string | null = null;
 
   for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
+    throwIfSolanaExecutionCancelled(callerSignal === undefined ? undefined : { signal: callerSignal });
     const filters = tokenProgram === "spl-token"
       ? [
           { dataSize: 165 },
@@ -232,10 +245,13 @@ export async function getSolanaTokenAccountPages(
         timeoutMs,
         programId,
         observationContext,
+        callerSignal,
       );
     } catch (error: unknown) {
+      if (error instanceof SolanaExecutionCancelledError) throw error;
       return stopAfterFailure(pages, error instanceof PageRequestFailure ? error.reason : "provider_error");
     }
+    throwIfSolanaExecutionCancelled(callerSignal === undefined ? undefined : { signal: callerSignal });
 
     const nextCursor = page.paginationKey;
     const pageAddresses = new Set<string>();

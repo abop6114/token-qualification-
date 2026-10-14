@@ -1,5 +1,7 @@
 import type { RawMarketPoolObservation, MarketVolumeWindow } from "../../types/market";
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
+import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
+import { createSolanaRequestAbortScope } from "../solana/solanaRequestAbortScope";
 
 const TOKEN_PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/";
 const VOLUME_WINDOWS: readonly MarketVolumeWindow[] = ["m5", "h1", "h6", "h24"];
@@ -121,47 +123,49 @@ export async function getSolanaMintMarkets(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = DEX_SCREENER_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
+  callerSignal?: AbortSignal,
 ): Promise<RawMarketPoolObservation[]> {
+  if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new DexScreenerProviderError("configuration_error");
   }
 
-  const controller = new AbortController();
-  let timedOut = false;
-  // Abort cancels the underlying fetch; prompt settlement still depends on fetch honoring its signal.
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  const scope = createSolanaRequestAbortScope(timeoutMs, callerSignal);
+  let requestInvoked = false;
 
   try {
     return await observeProviderRequest(
       observationContext,
       { section: "market", provider: "dexscreener", operation: "tokenPairs" },
       async () => {
+        if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        requestInvoked = true;
         try {
-          return await fetchImpl(`${TOKEN_PAIRS_URL}${encodeURIComponent(mintAddress)}`, { signal: controller.signal });
-        } catch {
-          if (timedOut) throw new DexScreenerProviderError("request_timeout");
+          return await fetchImpl(`${TOKEN_PAIRS_URL}${encodeURIComponent(mintAddress)}`, { signal: scope.signal });
+        } catch (error: unknown) {
+          if (scope.isCallerAbort(error)) throw new SolanaExecutionCancelledError(requestInvoked);
+          if (scope.isTimedOut()) throw new DexScreenerProviderError("request_timeout");
           throw new DexScreenerProviderError("transport_error");
         }
       },
       async (response) => {
-        if (timedOut) throw new DexScreenerProviderError("request_timeout");
+        if (scope.isTimedOut()) throw new DexScreenerProviderError("request_timeout");
         if (!response.ok) throw new DexScreenerProviderError("http_error", response.status);
 
         let payload: unknown;
         try {
           payload = await response.json();
-        } catch {
-          if (timedOut) throw new DexScreenerProviderError("request_timeout");
+        } catch (error: unknown) {
+          if (scope.isCallerAbort(error)) throw new SolanaExecutionCancelledError(requestInvoked);
+          if (scope.isTimedOut()) throw new DexScreenerProviderError("request_timeout");
           throw new DexScreenerProviderError("malformed_response");
         }
 
-        if (timedOut) throw new DexScreenerProviderError("request_timeout");
+        if (scope.isTimedOut()) throw new DexScreenerProviderError("request_timeout");
         return parseDexScreenerPairs(payload);
       },
       (error, responseReceived) => {
+        if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
         if (error instanceof DexScreenerProviderError) {
           if (error.category === "request_timeout") return "request_timeout";
           if (error.category === "http_error") return "http_error";
@@ -172,6 +176,6 @@ export async function getSolanaMintMarkets(
       },
     );
   } finally {
-    clearTimeout(timeout);
+    scope.dispose();
   }
 }

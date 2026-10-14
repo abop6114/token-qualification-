@@ -1,4 +1,5 @@
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
+import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "tqe-transfer-history-probe";
@@ -207,6 +208,7 @@ export async function getHeliusTransferPage(
   fetchImpl: typeof fetch = fetch,
   observationContext?: SolanaProviderRequestObservationContext,
   requestTimeoutObserved?: () => boolean,
+  requestCancelledObserved?: (error: unknown) => boolean,
 ): Promise<HeliusTransferPage> {
   const apiKey = process.env.HELIUS_API_KEY;
   if (apiKey === undefined || apiKey.trim() === "") {
@@ -240,7 +242,8 @@ export async function getHeliusTransferPage(
             }],
           }),
         });
-      } catch {
+      } catch (error: unknown) {
+        if (error instanceof SolanaExecutionCancelledError) throw error;
         throw new HeliusTransferProviderError("transport", "Helius transfer-history request failed.");
       }
     },
@@ -252,7 +255,10 @@ export async function getHeliusTransferPage(
       let payload: unknown;
       try {
         payload = await response.json();
-      } catch {
+      } catch (error: unknown) {
+        let callerCancelled = false;
+        try { callerCancelled = requestCancelledObserved?.(error) === true; } catch { /* Keep provider errors sanitized. */ }
+        if (callerCancelled) throw new SolanaExecutionCancelledError(true);
         throw new HeliusTransferProviderError("malformed_response", "Helius returned malformed transfer-history JSON.");
       }
 
@@ -286,6 +292,7 @@ export async function getHeliusTransferPage(
       return { observations, paginationToken: token as string | null };
     },
     (error, responseReceived) => {
+      if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
       try {
         if (requestTimeoutObserved?.() === true) return "request_timeout";
       } catch {

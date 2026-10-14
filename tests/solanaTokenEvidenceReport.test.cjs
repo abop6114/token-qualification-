@@ -4,10 +4,12 @@ const {
   generateSolanaTokenEvidenceReport,
   SolanaTokenEvidenceReportRequestError,
 } = require("../dist/application/solanaTokenEvidenceReport.js");
+const { generateSolanaTokenEvidencePresentation } = require("../dist/application/solanaTokenEvidencePresentationService.js");
 const { SolanaAccountProviderError } = require("../dist/providers/solana/heliusRpc.js");
 const { DexScreenerProviderError } = require("../dist/providers/market/dexScreener.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { decodeSolanaPublicKey, encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
+const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
 const signature = (byte) => {
@@ -413,4 +415,43 @@ test("report assembly preserves nested evidence and does not claim atomic observ
   assert.equal(report.market.evidence.provenance.fetchedAt, FETCHED_AT);
   assert.equal(report.holders.evidence.snapshotRecord.snapshot.enumeration.slotConsistency, "not_guaranteed");
   assert.equal(report.chain, "solana");
+});
+
+test("trusted caller cancellation stops report acquisition without becoming evidence", async () => {
+  const preAborted = new AbortController();
+  preAborted.abort();
+  let calls = 0;
+  await assert.rejects(generateSolanaTokenEvidenceReport(REQUEST, dependencies({
+    getAccount: async () => { calls += 1; return mintAccount(); },
+  }), { signal: preAborted.signal }), SolanaExecutionCancelledError);
+  assert.equal(calls, 0);
+
+  const controller = new AbortController();
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const operation = generateSolanaTokenEvidenceReport(REQUEST, dependencies({
+    getAccount: async (_address, signal) => {
+      assert.equal(signal, controller.signal);
+      markStarted();
+      return await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new SolanaExecutionCancelledError(true)), { once: true }));
+    },
+  }), { signal: controller.signal });
+  await started;
+  controller.abort();
+  await assert.rejects(operation, SolanaExecutionCancelledError);
+});
+
+test("cancellation at report completion prevents report success and presentation conversion", async () => {
+  const controller = new AbortController();
+  const now = () => { controller.abort(); return new Date(FETCHED_AT); };
+  await assert.rejects(generateSolanaTokenEvidenceReport(REQUEST, dependencies({
+    getAccount: async () => null,
+    now,
+  }), { signal: controller.signal }), SolanaExecutionCancelledError);
+
+  const presentationController = new AbortController();
+  await assert.rejects(generateSolanaTokenEvidencePresentation(REQUEST, dependencies({
+    getAccount: async () => null,
+    now: () => { queueMicrotask(() => presentationController.abort()); return new Date(FETCHED_AT); },
+  }), { signal: presentationController.signal }), SolanaExecutionCancelledError);
 });

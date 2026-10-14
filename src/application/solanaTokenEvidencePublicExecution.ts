@@ -8,6 +8,9 @@ import type {
 } from "../types/solanaTokenEvidencePublicExecution";
 import type { GenerateSolanaTokenEvidenceReportRequest } from "../types/solanaTokenEvidenceReport";
 import type { SolanaTokenEvidencePresentationV1 } from "../types/solanaTokenEvidencePresentation";
+import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../types/solanaTrustedExecutionContext";
+import type { SolanaTrustedExecutionContext } from "../types/solanaTrustedExecutionContext";
+import type { SolanaTokenEvidencePublicExecutionOptions } from "../types/solanaTokenEvidencePublicExecution";
 
 const ADMISSION_ERROR_MESSAGES: Record<SolanaTokenEvidenceAdmissionErrorCategory, string> = {
   admission_rejected: "The evidence request was rejected by admission policy.",
@@ -70,8 +73,13 @@ function isAdmissionPolicy(value: unknown): value is SolanaTokenEvidencePublicEx
 export async function executeSolanaTokenEvidencePublicRequest(
   input: unknown,
   dependencies: SolanaTokenEvidencePublicExecutionDependencies,
+  options: SolanaTokenEvidencePublicExecutionOptions = {},
 ): Promise<SolanaTokenEvidencePresentationV1> {
   const request = parseSolanaTokenEvidencePublicRequest(input);
+  const context: SolanaTrustedExecutionContext | undefined = options.signal === undefined
+    ? undefined
+    : { signal: options.signal };
+  throwIfSolanaExecutionCancelled(context);
 
   const dependencyRecord: unknown = dependencies;
   const policyValue = typeof dependencyRecord === "object" && dependencyRecord !== null
@@ -96,19 +104,34 @@ export async function executeSolanaTokenEvidencePublicRequest(
 
   let permit: SolanaTokenEvidenceAdmissionPermit;
   try {
-    permit = await policyValue.acquire(copyValidatedRequest(request));
+    permit = await policyValue.acquire(copyValidatedRequest(request), context);
   } catch (error: unknown) {
+    if (error instanceof SolanaExecutionCancelledError) throw error;
     if (error instanceof SolanaTokenEvidenceAdmissionError) throw error;
+    // Cancellation is causal only when the admission dependency rejects with the
+    // trusted signal's reason; an unrelated failure can race a later abort.
+    if (context?.signal?.aborted && error === context.signal.reason) throw new SolanaExecutionCancelledError();
     throw new SolanaTokenEvidencePublicExecutionError("internal_operational_failure");
   }
   if (typeof permit !== "object" || permit === null || typeof permit.release !== "function") {
     throw new SolanaTokenEvidencePublicExecutionError("internal_operational_failure");
   }
 
+  if (context?.signal?.aborted) {
+    try { await permit.release(); } catch { /* Keep cancellation as the primary outcome. */ }
+    throw new SolanaExecutionCancelledError();
+  }
+
   let execution: { status: "success"; presentation: SolanaTokenEvidencePresentationV1 }
     | { status: "failure"; error: unknown };
   try {
-    execution = { status: "success", presentation: await executePresentation(request) };
+    const presentation = executorValue === undefined
+      ? await generateSolanaTokenEvidencePresentation(request, {}, context)
+      : await (executePresentation as NonNullable<typeof executePresentation>)(request, context);
+    // This is the success-finalization boundary. Later cancellation during permit
+    // cleanup cannot retroactively invalidate an already finalized result.
+    throwIfSolanaExecutionCancelled(context);
+    execution = { status: "success", presentation };
   } catch (error: unknown) {
     execution = { status: "failure", error };
   }

@@ -1,5 +1,7 @@
 import { isSolanaPublicKeySyntax } from "../../validation/solanaAddress";
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
+import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
+import { createSolanaRequestAbortScope } from "./solanaRequestAbortScope";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = 1;
@@ -63,7 +65,9 @@ export async function getSolanaAccount(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
+  callerSignal?: AbortSignal,
 ): Promise<RawSolanaAccount | null> {
+  if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new SolanaAccountProviderError("configuration_error");
   }
@@ -74,24 +78,21 @@ export async function getSolanaAccount(
   }
 
   const endpoint = `${HELIUS_MAINNET_RPC_URL}?api-key=${encodeURIComponent(apiKey)}`;
-  const controller = new AbortController();
-  let timedOut = false;
-  // Abort cancels the underlying fetch; prompt settlement still depends on fetch honoring its signal.
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
+  const scope = createSolanaRequestAbortScope(timeoutMs, callerSignal);
+  let requestInvoked = false;
 
   try {
     return await observeProviderRequest(
       observationContext,
       { section: "mint", provider: "helius", operation: "getAccountInfo" },
       async () => {
+        if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        requestInvoked = true;
         try {
           return await fetchImpl(endpoint, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            signal: controller.signal,
+            signal: scope.signal,
             body: JSON.stringify({
               jsonrpc: "2.0",
               id: RPC_REQUEST_ID,
@@ -99,24 +100,26 @@ export async function getSolanaAccount(
               params: [address, { encoding: "base64" }],
             }),
           });
-        } catch {
-          if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+        } catch (error: unknown) {
+          if (scope.isCallerAbort(error)) throw new SolanaExecutionCancelledError(requestInvoked);
+          if (scope.isTimedOut()) throw new SolanaAccountProviderError("request_timeout");
           throw new SolanaAccountProviderError("transport_error");
         }
       },
       async (response) => {
-        if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+        if (scope.isTimedOut()) throw new SolanaAccountProviderError("request_timeout");
         if (!response.ok) throw new SolanaAccountProviderError("http_error", response.status);
 
         let payload: unknown;
         try {
           payload = await response.json();
-        } catch {
-          if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+        } catch (error: unknown) {
+          if (scope.isCallerAbort(error)) throw new SolanaExecutionCancelledError(requestInvoked);
+          if (scope.isTimedOut()) throw new SolanaAccountProviderError("request_timeout");
           throw new SolanaAccountProviderError("malformed_response");
         }
 
-        if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+        if (scope.isTimedOut()) throw new SolanaAccountProviderError("request_timeout");
         if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
           throw new SolanaAccountProviderError("malformed_response");
         }
@@ -158,6 +161,7 @@ export async function getSolanaAccount(
         return { requestedAddress: address, owner: result.value.owner, dataBase64: accountData[0] };
       },
       (error, responseReceived) => {
+        if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
         if (error instanceof SolanaAccountProviderError) {
           if (error.category === "request_timeout") return "request_timeout";
           if (error.category === "http_error") return "http_error";
@@ -169,6 +173,6 @@ export async function getSolanaAccount(
       },
     );
   } finally {
-    clearTimeout(timeout);
+    scope.dispose();
   }
 }

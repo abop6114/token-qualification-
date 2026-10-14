@@ -76,6 +76,7 @@ const REASONS: readonly SolanaTelemetrySafeReasonCode[] = [
   "mint_unresolved", "holder_evidence_unavailable", "history_not_requested",
   "provider_preflight_failure", "provider_failure", "unexpected_application_failure",
   "dependency_not_instrumented", "prerequisite_not_met", "observer_failure", "instrumentation_incomplete",
+  "caller_cancelled",
 ];
 
 const DISPOSITIONS: readonly SolanaTelemetryAcquisitionDisposition[] = [
@@ -157,7 +158,8 @@ function validateRequestObservation(value: unknown): asserts value is SolanaProv
     (value.outcome === "accepted" && value.responseReceived === true) ||
     ((value.outcome === "http_error" || value.outcome === "rpc_error" || value.outcome === "malformed_response") && value.responseReceived === true) ||
     (value.outcome === "transport_error" && value.responseReceived === false) ||
-    (value.outcome === "request_timeout" && typeof value.responseReceived === "boolean");
+    (value.outcome === "request_timeout" && typeof value.responseReceived === "boolean") ||
+    (value.outcome === "request_cancelled" && typeof value.responseReceived === "boolean");
   if (!validResponseOutcome) fail("invalid_request_observation");
 }
 
@@ -237,7 +239,7 @@ function cloneStage(value: SolanaApplicationStageObservation): SolanaApplication
 }
 
 function emptySectionCounts(): SolanaTelemetrySectionCounts {
-  return { attemptedRequestCount: 0, responseReceivedCount: 0, acceptedOperationCount: 0, failedOperationCount: 0, timeoutCount: 0 };
+  return { attemptedRequestCount: 0, responseReceivedCount: 0, acceptedOperationCount: 0, failedOperationCount: 0, timeoutCount: 0, cancelledOperationCount: 0 };
 }
 
 /**
@@ -273,7 +275,7 @@ export function aggregateSolanaReportOperationalTelemetry(
   validateRequestStageConsistency(requests, stages);
 
   const bySection = Object.fromEntries(SECTIONS.map((section) => [section, emptySectionCounts()])) as SolanaTelemetrySectionCountMap;
-  const counts = { attemptedRequestCount: 0, responseReceivedCount: 0, acceptedOperationCount: 0, failedOperationCount: 0, timeoutCount: 0 };
+  const counts = { attemptedRequestCount: 0, responseReceivedCount: 0, acceptedOperationCount: 0, failedOperationCount: 0, timeoutCount: 0, cancelledOperationCount: 0 };
   for (const request of requests) {
     const section = bySection[request.section];
     counts.attemptedRequestCount += 1;
@@ -285,6 +287,9 @@ export function aggregateSolanaReportOperationalTelemetry(
     if (request.outcome === "accepted") {
       counts.acceptedOperationCount += 1;
       section.acceptedOperationCount += 1;
+    } else if (request.outcome === "request_cancelled") {
+      counts.cancelledOperationCount += 1;
+      section.cancelledOperationCount += 1;
     } else {
       counts.failedOperationCount += 1;
       section.failedOperationCount += 1;
@@ -326,6 +331,11 @@ function validateRequestStageConsistency(
       stage.requestObservationCoverage.status === "not_attempted" ||
       stage.requestObservationCoverage.status === "preflight_failed"
     )) fail("invalid_coverage_combination");
+
+    const hasCancelledRequest = requests.some((request) => request.section === section && request.outcome === "request_cancelled");
+    if (hasCancelledRequest && (stage === undefined || stage.outcome !== "failed" || stage.reasonCode !== "caller_cancelled")) {
+      fail("invalid_coverage_combination");
+    }
 
     if (!hasRequestEvent && stage.outcome === "completed" && stage.requestObservationCoverage.status === "complete") {
       fail("invalid_coverage_combination");

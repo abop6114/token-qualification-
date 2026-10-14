@@ -247,6 +247,24 @@ test("adapter-owned timeouts are classified only from the adapter timeout state"
   });
 });
 
+test("a standalone AbortError is transport failure even if caller cancellation overlaps before classification", async () => {
+  await withApiKey(async () => {
+    const controller = new AbortController();
+    const recorder = observationContext();
+    let rejectFetch;
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    const pendingFetch = new Promise((_resolve, reject) => { rejectFetch = reject; });
+    const operation = getSolanaAccount(ADDRESS, () => { markStarted(); return pendingFetch; }, 5_000, recorder.context, controller.signal);
+    await started;
+    rejectFetch(new DOMException("independent abort", "AbortError"));
+    controller.abort();
+    await assert.rejects(operation, (error) => error instanceof SolanaAccountProviderError && error.category === "transport_error");
+    assert.equal(recorder.events.length, 1);
+    assert.equal(recorder.events[0].outcome, "transport_error");
+  });
+});
+
 test("an abort-ignoring fetch is not represented as guaranteed cancelled", async () => {
   await withApiKey(async () => {
     const recorder = observationContext();
@@ -366,18 +384,117 @@ test("transaction provider records one fetch and leaves candidate identity out o
   });
 });
 
-test("transaction telemetry does not call an injected abort-like error an adapter timeout", async () => {
+test("transaction telemetry does not treat an injected timeout-shaped fetch error as its own timeout", async () => {
   await withApiKey(async () => {
     const recorder = observationContext();
     let calls = 0;
     await assert.rejects(getHeliusTransaction(signature(19), async () => {
       calls += 1;
       throw new HeliusTransactionProviderError("request_timeout", "Synthetic injected error.");
-    }, 500, recorder.context), (error) => error.category === "request_timeout");
+    }, 500, recorder.context), (error) => error.category === "transport");
     assert.equal(calls, 1);
     assert.equal(recorder.events.length, 1);
     assert.equal(recorder.events[0].outcome, "transport_error");
     assert.equal(recorder.events[0].responseReceived, false);
+  });
+});
+
+test("pre-aborted historical transfer requests do not invoke fetch or emit an attempt", async () => {
+  await withApiKey(async () => {
+    const recorder = observationContext();
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    await assert.rejects(getHeliusHistoricalTransferPage({
+      mintAddress: MINT, ownerAuthority: OWNER, fromUnixSeconds: 1_790_000_000,
+      toUnixSecondsExclusive: 1_800_000_000, limit: 10, paginationToken: null,
+    }, 500, async () => { calls += 1; return response({}); }, recorder.context, controller.signal),
+    (error) => error.name === "SolanaExecutionCancelledError" && error.requestAttempted === false);
+    assert.equal(calls, 0);
+    assert.deepEqual(recorder.events, []);
+  });
+});
+
+test("active historical transfer cancellation is observed once and stays distinct from transport failure", async () => {
+  await withApiKey(async () => {
+    const recorder = observationContext();
+    const controller = new AbortController();
+    let calls = 0;
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    const operation = getHeliusHistoricalTransferPage({
+      mintAddress: MINT, ownerAuthority: OWNER, fromUnixSeconds: 1_790_000_000,
+      toUnixSecondsExclusive: 1_800_000_000, limit: 10, paginationToken: null,
+    }, 5_000, async (_url, init) => {
+      calls += 1;
+      assert.ok(init.signal instanceof AbortSignal);
+      markStarted();
+      return await new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+    }, recorder.context, controller.signal);
+    await started;
+    controller.abort();
+    await assert.rejects(operation, (error) => error.name === "SolanaExecutionCancelledError" && error.requestAttempted === true);
+    assert.equal(calls, 1);
+    assert.equal(recorder.events.length, 1);
+    assert.deepEqual([recorder.events[0].outcome, recorder.events[0].requestAttempted, recorder.events[0].responseReceived], ["request_cancelled", true, false]);
+  });
+});
+
+test("ordinary historical transport failure remains transport_error", async () => {
+  await withApiKey(async () => {
+    const recorder = observationContext();
+    await assert.rejects(getHeliusHistoricalTransferPage({
+      mintAddress: MINT, ownerAuthority: OWNER, fromUnixSeconds: 1_790_000_000,
+      toUnixSecondsExclusive: 1_800_000_000, limit: 10, paginationToken: null,
+    }, 500, async () => { throw new Error("sanitized transport failure"); }, recorder.context));
+    assert.equal(recorder.events.length, 1);
+    assert.equal(recorder.events[0].outcome, "transport_error");
+    assert.equal(recorder.events[0].responseReceived, false);
+  });
+});
+
+test("caller cancellation after a completed historical fetch does not reclassify its observation", async () => {
+  await withApiKey(async () => {
+    const recorder = observationContext();
+    const controller = new AbortController();
+    const page = await getHeliusHistoricalTransferPage({
+      mintAddress: MINT, ownerAuthority: OWNER, fromUnixSeconds: 1_790_000_000,
+      toUnixSecondsExclusive: 1_800_000_000, limit: 10, paginationToken: null,
+    }, 500, async () => response({ jsonrpc: "2.0", id: "tqe-transfer-history-probe", result: { data: [], paginationToken: null } }), recorder.context, controller.signal);
+    controller.abort();
+    assert.deepEqual(page, { observations: [], paginationToken: null });
+    assert.equal(recorder.events.length, 1);
+    assert.equal(recorder.events[0].outcome, "accepted");
+  });
+});
+
+test("caller cancellation reaches active fetches in the other provider acquisition categories", async () => {
+  await withApiKey(async () => {
+    const scenarios = [
+      { operation: "getAccountInfo", run: (fetch, context, signal) => getSolanaAccount(ADDRESS, fetch, 5_000, context, signal) },
+      { operation: "tokenPairs", run: (fetch, context, signal) => getSolanaMintMarkets(MINT, fetch, 5_000, context, signal) },
+      { operation: "getProgramAccountsV2", run: (fetch, context, signal) => getSolanaTokenAccountPages(MINT, "spl-token", fetch, 5_000, context, signal) },
+      { operation: "getTransaction", run: (fetch, context, signal) => getHeliusTransaction(signature(21), fetch, 5_000, context, signal) },
+    ];
+    for (const scenario of scenarios) {
+      const recorder = observationContext();
+      const controller = new AbortController();
+      let markStarted;
+      const started = new Promise((resolve) => { markStarted = resolve; });
+      let calls = 0;
+      const operation = scenario.run(async (_url, init) => {
+        calls += 1;
+        assert.equal(init.signal instanceof AbortSignal, true);
+        markStarted();
+        return await new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true }));
+      }, recorder.context, controller.signal);
+      await started;
+      controller.abort();
+      await assert.rejects(operation, (error) => error.name === "SolanaExecutionCancelledError" && error.requestAttempted === true);
+      assert.equal(calls, 1);
+      assert.equal(recorder.events.length, 1);
+      assert.deepEqual([recorder.events[0].operation, recorder.events[0].outcome, recorder.events[0].requestAttempted], [scenario.operation, "request_cancelled", true]);
+    }
   });
 });
 

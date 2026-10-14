@@ -14,6 +14,7 @@ import type { SolanaProviderRequestObservationContext } from "../providers/provi
 import type { SolanaHistoricalQueryPlan, SolanaHistoricalQueryPlanV2, SolanaHistoricalQueryPlanVersioned } from "../types/solanaHistoricalQueryPlan";
 import { isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 import { validateSolanaHistoricalQueryPlanV2 } from "../normalization/solanaHistoricalQueryPlan";
+import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../types/solanaTrustedExecutionContext";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
@@ -54,6 +55,8 @@ export interface ExecuteSolanaHistoricalQueryPlanOptions {
   requestObservationContext?: SolanaProviderRequestObservationContext;
   /** Injectable epoch-millisecond clock for deterministic evidence/telemetry tests. */
   now?: () => number;
+  /** Trusted caller cancellation; never stored in the query plan or evidence. */
+  signal?: AbortSignal;
 }
 
 interface AuthorityRun {
@@ -374,6 +377,7 @@ async function executeAuthority(
   fetchPage: HeliusHistoricalTransferPageFetcher,
   requestObservationContext: SolanaProviderRequestObservationContext | undefined,
   incrementTotalRequests: () => number,
+  signal?: AbortSignal,
 ): Promise<AuthorityRun> {
   let requestCount = 0;
   const pages: SolanaHistoricalPageEvidence[] = [];
@@ -382,6 +386,7 @@ async function executeAuthority(
   let cursor: string | null = null;
 
   for (;;) {
+    throwIfSolanaExecutionCancelled(signal === undefined ? undefined : { signal });
     if (requestCount >= plan.maxPagesPerAuthority) {
       return {
         ...emptyProviderErrorEvidence(
@@ -407,7 +412,8 @@ async function executeAuthority(
         limit: requestLimit,
         paginationToken: cursor,
       };
-      page = await fetchPage(request, requestTimeoutMs, requestObservationContext);
+      page = await fetchPage(request, requestTimeoutMs, requestObservationContext, signal);
+      throwIfSolanaExecutionCancelled(signal === undefined ? undefined : { signal });
       if (
         page === null ||
         typeof page !== "object" ||
@@ -484,6 +490,7 @@ async function executeAuthority(
       }
       cursor = page.paginationToken;
     } catch (error: unknown) {
+      if (error instanceof SolanaExecutionCancelledError) throw error;
       return emptyProviderErrorEvidence(authorityAddress, requestCount, pages, observations, error);
     }
   }
@@ -494,6 +501,7 @@ export async function executeSolanaHistoricalQueryPlan(
   options: ExecuteSolanaHistoricalQueryPlanOptions,
 ): Promise<SolanaHistoricalQueryExecutionResult> {
   assertPlan(plan);
+  throwIfSolanaExecutionCancelled(options.signal === undefined ? undefined : { signal: options.signal });
   if (!positiveSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs > MAX_TIMEOUT_MS) {
     throw new Error("requestTimeoutMs must be a positive safe integer within the supported timer range.");
   }
@@ -513,6 +521,7 @@ export async function executeSolanaHistoricalQueryPlan(
   let totalRequestCount = 0;
 
   for (const candidate of selectedInPlanOrder) {
+    throwIfSolanaExecutionCancelled(options.signal === undefined ? undefined : { signal: options.signal });
     const run = await executeAuthority(
       plan,
       candidate.authorityAddress,
@@ -526,6 +535,7 @@ export async function executeSolanaHistoricalQueryPlan(
         totalRequestCount += 1;
         return totalRequestCount;
       },
+      options.signal,
     );
     selectedRuns.set(candidate.authorityAddress, run);
   }

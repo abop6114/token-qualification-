@@ -9,6 +9,7 @@ const {
 const {
   SolanaTokenEvidencePublicRequestError,
 } = require("../dist/application/solanaTokenEvidencePublicRequest.js");
+const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
 
 const ADDRESS = "11111111111111111111111111111111";
 
@@ -248,5 +249,120 @@ test("admission receives a detached request rather than the original public obje
   }));
   assert.notEqual(admissionRequest, input);
   assert.notEqual(admissionRequest.historicalTransactions, input.historicalTransactions);
+});
+
+test("pre-cancelled trusted context prevents admission and execution", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let admissions = 0;
+  let executions = 0;
+  await assert.rejects(executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async () => { admissions += 1; return permit(); },
+    executePresentation: async () => { executions += 1; return {}; },
+  }), { signal: controller.signal }), SolanaExecutionCancelledError);
+  assert.equal(admissions, 0);
+  assert.equal(executions, 0);
+});
+
+test("late admission permit is released once after cancellation and presentation is not started", async () => {
+  const controller = new AbortController();
+  let finishAcquire;
+  const acquiring = new Promise((resolve) => { finishAcquire = resolve; });
+  const calls = [];
+  const operation = executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async (_request, context) => {
+      assert.equal(context.signal, controller.signal);
+      calls.push("acquire");
+      await acquiring;
+      return permit(() => { calls.push("release"); });
+    },
+    executePresentation: async () => { calls.push("execute"); return {}; },
+  }), { signal: controller.signal });
+  await Promise.resolve();
+  controller.abort();
+  finishAcquire();
+  await assert.rejects(operation, SolanaExecutionCancelledError);
+  assert.deepEqual(calls, ["acquire", "release"]);
+});
+
+test("admission cancellation rejection remains caller cancellation rather than an internal failure", async () => {
+  const controller = new AbortController();
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  let executions = 0;
+  const operation = executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async (_request, context) => {
+      assert.equal(context.signal, controller.signal);
+      markStarted();
+      await new Promise((resolve) => context.signal.addEventListener("abort", resolve, { once: true }));
+      throw context.signal.reason;
+    },
+    executePresentation: async () => { executions += 1; return {}; },
+  }), { signal: controller.signal });
+  await started;
+  controller.abort();
+  await assert.rejects(operation, SolanaExecutionCancelledError);
+  assert.equal(executions, 0);
+});
+
+test("a typed admission rejection remains authoritative when cancellation overlaps", async () => {
+  const controller = new AbortController();
+  const rejection = new SolanaTokenEvidenceAdmissionError("admission_rejected");
+  await assert.rejects(executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async () => { controller.abort(); throw rejection; },
+    executePresentation: async () => ({}),
+  }), { signal: controller.signal }), (error) => error === rejection);
+});
+
+test("an unrelated admission failure is sanitized rather than inferred as cancellation from signal state", async () => {
+  const controller = new AbortController();
+  const sentinel = "unrelated-admission-failure";
+  await assert.rejects(executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async () => { controller.abort(); throw new Error(sentinel); },
+    executePresentation: async () => ({}),
+  }), { signal: controller.signal }), (error) => {
+    assert.ok(error instanceof SolanaTokenEvidencePublicExecutionError);
+    assert.equal(error.category, "internal_operational_failure");
+    assert.equal(error.message.includes(sentinel), false);
+    return true;
+  });
+});
+
+test("cancellation before successful execution finalization prevents normal success", async () => {
+  const controller = new AbortController();
+  const calls = [];
+  await assert.rejects(executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async () => permit(() => { calls.push("release"); }),
+    executePresentation: async () => { controller.abort(); return { ok: true }; },
+  }), { signal: controller.signal }), SolanaExecutionCancelledError);
+  assert.deepEqual(calls, ["release"]);
+});
+
+test("cancellation during permit cleanup does not retroactively invalidate finalized success", async () => {
+  const controller = new AbortController();
+  const result = { ok: "finalized" };
+  let releases = 0;
+  const actual = await executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async () => permit(async () => { releases += 1; controller.abort(); await Promise.resolve(); }),
+    executePresentation: async () => result,
+  }), { signal: controller.signal });
+  assert.equal(actual, result);
+  assert.equal(releases, 1);
+});
+
+test("a primary cancellation remains visible when permit cleanup also fails", async () => {
+  await assert.rejects(executeSolanaTokenEvidencePublicRequest(publicInput(), dependencies({
+    acquire: async () => permit(() => { throw new Error("release failed"); }),
+    executePresentation: async () => { throw new SolanaExecutionCancelledError(); },
+  })), SolanaExecutionCancelledError);
+});
+
+test("trusted cancellation context cannot be supplied as public JSON", async () => {
+  let admissions = 0;
+  await assert.rejects(executeSolanaTokenEvidencePublicRequest(publicInput({ signal: "untrusted" }), dependencies({
+    acquire: async () => { admissions += 1; return permit(); },
+    executePresentation: async () => ({}),
+  })), SolanaTokenEvidencePublicRequestError);
+  assert.equal(admissions, 0);
 });
 
