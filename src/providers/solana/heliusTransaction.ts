@@ -1,3 +1,5 @@
+import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
+
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "tqe-transaction-probe";
 export const HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS = 30_000;
@@ -38,6 +40,7 @@ export async function getHeliusTransaction(
   signature: string,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS,
+  observationContext?: SolanaProviderRequestObservationContext,
 ): Promise<HeliusTransactionResult> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new HeliusTransactionProviderError("configuration", "Helius request timeout is invalid.");
@@ -54,59 +57,75 @@ export async function getHeliusTransaction(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: RPC_REQUEST_ID,
-        method: "getTransaction",
-        params: [signature, {
-          encoding: "json",
-          commitment: "finalized",
-          maxSupportedTransactionVersion: 0,
-        }],
+    return await observeProviderRequest(
+      observationContext,
+      { section: "transaction_enrichment", provider: "helius", operation: "getTransaction" },
+      () => fetchImpl(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: RPC_REQUEST_ID,
+          method: "getTransaction",
+          params: [signature, {
+            encoding: "json",
+            commitment: "finalized",
+            maxSupportedTransactionVersion: 0,
+          }],
+        }),
       }),
-    });
+      async (response) => {
+        if (!response.ok) {
+          throw new HeliusTransactionProviderError(
+            "http",
+            "Helius transaction HTTP request failed.",
+            null,
+            response.status,
+          );
+        }
 
-    if (!response.ok) {
-      throw new HeliusTransactionProviderError(
-        "http",
-        "Helius transaction HTTP request failed.",
-        null,
-        response.status,
-      );
-    }
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch {
+          if (controller.signal.aborted) {
+            throw new HeliusTransactionProviderError("request_timeout", "Helius transaction request timed out.");
+          }
+          throw new HeliusTransactionProviderError("malformed_response", "Helius returned malformed transaction JSON.");
+        }
 
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      if (controller.signal.aborted) {
-        throw new HeliusTransactionProviderError("request_timeout", "Helius transaction request timed out.");
-      }
-      throw new HeliusTransactionProviderError("malformed_response", "Helius returned malformed transaction JSON.");
-    }
-
-    if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
-      throw new HeliusTransactionProviderError("malformed_response", "Helius returned a malformed transaction JSON-RPC response.");
-    }
-    if ("error" in payload) {
-      const error = payload.error;
-      if (isJsonObject(error) && typeof error.code === "number" && Number.isSafeInteger(error.code)) {
-        throw new HeliusTransactionProviderError("rpc", "Helius returned a JSON-RPC transaction error.", error.code);
-      }
-      throw new HeliusTransactionProviderError("malformed_response", "Helius returned a malformed JSON-RPC transaction error.");
-    }
-    if (!("result" in payload)) {
-      throw new HeliusTransactionProviderError("malformed_response", "Helius omitted the transaction result.");
-    }
-    if (payload.result === null) return { status: "provider_result_null" };
-    if (!isJsonObject(payload.result)) {
-      throw new HeliusTransactionProviderError("malformed_response", "Helius returned a malformed transaction result.");
-    }
-    return { status: "returned", transaction: payload.result };
+        if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
+          throw new HeliusTransactionProviderError("malformed_response", "Helius returned a malformed transaction JSON-RPC response.");
+        }
+        if ("error" in payload) {
+          const error = payload.error;
+          if (isJsonObject(error) && typeof error.code === "number" && Number.isSafeInteger(error.code)) {
+            throw new HeliusTransactionProviderError("rpc", "Helius returned a JSON-RPC transaction error.", error.code);
+          }
+          throw new HeliusTransactionProviderError("malformed_response", "Helius returned a malformed JSON-RPC transaction error.");
+        }
+        if (!("result" in payload)) {
+          throw new HeliusTransactionProviderError("malformed_response", "Helius omitted the transaction result.");
+        }
+        if (payload.result === null) return { status: "provider_result_null" };
+        if (!isJsonObject(payload.result)) {
+          throw new HeliusTransactionProviderError("malformed_response", "Helius returned a malformed transaction result.");
+        }
+        return { status: "returned", transaction: payload.result };
+      },
+      (error, responseReceived) => {
+        if (controller.signal.aborted) return "request_timeout";
+        if (error instanceof HeliusTransactionProviderError) {
+          if (error.category === "request_timeout") return responseReceived ? "malformed_response" : "transport_error";
+          if (error.category === "http") return "http_error";
+          if (error.category === "rpc") return "rpc_error";
+          if (error.category === "malformed_response") return "malformed_response";
+          if (error.category === "transport") return "transport_error";
+        }
+        return responseReceived ? "malformed_response" : "transport_error";
+      },
+    );
   } catch (error: unknown) {
     if (controller.signal.aborted) {
       throw new HeliusTransactionProviderError("request_timeout", "Helius transaction request timed out.");

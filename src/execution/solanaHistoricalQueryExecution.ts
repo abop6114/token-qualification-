@@ -10,6 +10,7 @@ import {
   type HeliusHistoricalTransferPageFetcher,
 } from "../providers/solana/heliusHistoricalTransferAdapter";
 import type { SolanaHistoricalAmountEvidence, SolanaHistoricalAuthorityEvidence, SolanaHistoricalPageEvidence, SolanaHistoricalTransferObservation } from "../types/solanaHistoricalSampling";
+import type { SolanaProviderRequestObservationContext } from "../providers/providerRequestObservation";
 import type { SolanaHistoricalQueryPlan, SolanaHistoricalQueryPlanV2, SolanaHistoricalQueryPlanVersioned } from "../types/solanaHistoricalQueryPlan";
 import { isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 import { validateSolanaHistoricalQueryPlanV2 } from "../normalization/solanaHistoricalQueryPlan";
@@ -49,6 +50,8 @@ export interface ExecuteSolanaHistoricalQueryPlanOptions {
   requestTimeoutMs: number;
   /** Injectable page source for deterministic tests; defaults to the Helius adapter. */
   fetchPage?: HeliusHistoricalTransferPageFetcher;
+  /** Optional report-local request observations passed through the production adapter. */
+  requestObservationContext?: SolanaProviderRequestObservationContext;
   /** Injectable epoch-millisecond clock for deterministic evidence/telemetry tests. */
   now?: () => number;
 }
@@ -369,6 +372,7 @@ async function executeAuthority(
   authorityAddress: string,
   requestTimeoutMs: number,
   fetchPage: HeliusHistoricalTransferPageFetcher,
+  requestObservationContext: SolanaProviderRequestObservationContext | undefined,
   incrementTotalRequests: () => number,
 ): Promise<AuthorityRun> {
   let requestCount = 0;
@@ -403,7 +407,7 @@ async function executeAuthority(
         limit: requestLimit,
         paginationToken: cursor,
       };
-      page = await fetchPage(request, requestTimeoutMs);
+      page = await fetchPage(request, requestTimeoutMs, requestObservationContext);
       if (
         page === null ||
         typeof page !== "object" ||
@@ -497,7 +501,8 @@ export async function executeSolanaHistoricalQueryPlan(
   const now = options.now ?? Date.now;
   const startedAt = now();
   const fetchedAt = new Date(startedAt).toISOString();
-  const fetchPage = options.fetchPage ?? getHeliusHistoricalTransferPage;
+  const fetchPage = options.fetchPage ?? ((input, timeoutMs, observationContext) =>
+    getHeliusHistoricalTransferPage(input, timeoutMs, fetch, observationContext));
   const selectedInPlanOrder = plan.candidateAuthorities
     .filter((candidate) => candidate.plannedDisposition.status === "selected")
     .sort((left, right) =>
@@ -513,6 +518,7 @@ export async function executeSolanaHistoricalQueryPlan(
       candidate.authorityAddress,
       options.requestTimeoutMs,
       fetchPage,
+      options.requestObservationContext,
       () => {
         if (totalRequestCount >= plan.maximumProviderRequests) {
           throw new Error("Execution would exceed the validated plan request bound.");

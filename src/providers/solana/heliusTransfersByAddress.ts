@@ -1,3 +1,5 @@
+import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
+
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "tqe-transfer-history-probe";
 
@@ -203,6 +205,8 @@ export interface GetHeliusTransferPageInput {
 export async function getHeliusTransferPage(
   input: GetHeliusTransferPageInput,
   fetchImpl: typeof fetch = fetch,
+  observationContext?: SolanaProviderRequestObservationContext,
+  requestTimeoutObserved?: () => boolean,
 ): Promise<HeliusTransferPage> {
   const apiKey = process.env.HELIUS_API_KEY;
   if (apiKey === undefined || apiKey.trim() === "") {
@@ -210,72 +214,92 @@ export async function getHeliusTransferPage(
   }
 
   const endpoint = `${HELIUS_MAINNET_RPC_URL}?api-key=${encodeURIComponent(apiKey)}`;
-  let response: Response;
-  try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: RPC_REQUEST_ID,
-        method: "getTransfersByAddress",
-        params: [input.ownerAuthority, {
-          mint: input.mintAddress,
-          direction: "any",
-          limit: input.limit,
-          filters: {
-            blockTime: {
-              gte: input.fromUnixSeconds,
-              lt: input.toUnixSecondsExclusive,
-            },
-          },
-          ...(input.paginationToken === null ? {} : { paginationToken: input.paginationToken }),
-        }],
-      }),
-    });
-  } catch {
-    throw new HeliusTransferProviderError("transport", "Helius transfer-history request failed.");
-  }
+  return observeProviderRequest(
+    observationContext,
+    { section: "historical_acquisition", provider: "helius", operation: "getTransfersByAddress" },
+    async () => {
+      try {
+        return await fetchImpl(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: RPC_REQUEST_ID,
+            method: "getTransfersByAddress",
+            params: [input.ownerAuthority, {
+              mint: input.mintAddress,
+              direction: "any",
+              limit: input.limit,
+              filters: {
+                blockTime: {
+                  gte: input.fromUnixSeconds,
+                  lt: input.toUnixSecondsExclusive,
+                },
+              },
+              ...(input.paginationToken === null ? {} : { paginationToken: input.paginationToken }),
+            }],
+          }),
+        });
+      } catch {
+        throw new HeliusTransferProviderError("transport", "Helius transfer-history request failed.");
+      }
+    },
+    async (response) => {
+      if (!response.ok) {
+        throw new HeliusTransferProviderError("http", `Helius transfer-history HTTP request failed (status ${response.status}).`);
+      }
 
-  if (!response.ok) {
-    throw new HeliusTransferProviderError("http", `Helius transfer-history HTTP request failed (status ${response.status}).`);
-  }
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch {
+        throw new HeliusTransferProviderError("malformed_response", "Helius returned malformed transfer-history JSON.");
+      }
 
-  let payload: unknown;
-  try {
-    payload = await response.json();
-  } catch {
-    throw new HeliusTransferProviderError("malformed_response", "Helius returned malformed transfer-history JSON.");
-  }
+      if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
+        throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history JSON-RPC response.");
+      }
+      if ("error" in payload) {
+        const error = payload.error;
+        if (isJsonObject(error) && typeof error.code === "number") {
+          throw new HeliusTransferProviderError("rpc", `Helius transfer-history JSON-RPC error (code ${error.code}).`);
+        }
+        throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history JSON-RPC error.");
+      }
 
-  if (
-    !isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID
-  ) {
-    throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history JSON-RPC response.");
-  }
-  if ("error" in payload) {
-    const error = payload.error;
-    if (isJsonObject(error) && typeof error.code === "number") {
-      throw new HeliusTransferProviderError("rpc", `Helius transfer-history JSON-RPC error (code ${error.code}).`);
-    }
-    throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history JSON-RPC error.");
-  }
+      const result = payload.result;
+      if (!isJsonObject(result) || !Array.isArray(result.data)) {
+        throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history page.");
+      }
+      const observations = result.data.map((row) => parseObservation(row, input.mintAddress));
+      if (observations.length > input.limit) {
+        throw new HeliusTransferProviderError("malformed_response", "Helius returned more transfer records than requested.");
+      }
 
-  const result = payload.result;
-  if (!isJsonObject(result) || !Array.isArray(result.data)) {
-    throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history page.");
-  }
-  const observations = result.data.map((row) => parseObservation(row, input.mintAddress));
-  if (observations.length > input.limit) {
-    throw new HeliusTransferProviderError("malformed_response", "Helius returned more transfer records than requested.");
-  }
-
-  if (!Object.prototype.hasOwnProperty.call(result, "paginationToken")) {
-    throw new HeliusTransferProviderError("malformed_response", "Helius omitted the transfer-history pagination token.");
-  }
-  const token = result.paginationToken;
-  if (token !== null && (typeof token !== "string" || token.length === 0)) {
-    throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history pagination token.");
-  }
-  return { observations, paginationToken: token as string | null };
+      if (!Object.prototype.hasOwnProperty.call(result, "paginationToken")) {
+        throw new HeliusTransferProviderError("malformed_response", "Helius omitted the transfer-history pagination token.");
+      }
+      const token = result.paginationToken;
+      if (token !== null && (typeof token !== "string" || token.length === 0)) {
+        throw new HeliusTransferProviderError("malformed_response", "Helius returned a malformed transfer-history pagination token.");
+      }
+      return { observations, paginationToken: token as string | null };
+    },
+    (error, responseReceived) => {
+      try {
+        if (requestTimeoutObserved?.() === true) return "request_timeout";
+      } catch {
+        // An unobservable timeout remains governed by the adapter error below.
+      }
+      if (error instanceof HeliusTransferProviderError) {
+        if (error.category === "http") return "http_error";
+        if (error.category === "rpc") return "rpc_error";
+        if (error.category === "malformed_response" || error.category === "pagination") return "malformed_response";
+        if (error.category === "transport") {
+          return "transport_error";
+        }
+      }
+      return responseReceived ? "malformed_response" : "transport_error";
+    },
+  );
 }

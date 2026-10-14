@@ -6,6 +6,8 @@ import type {
 } from "../../types/holders";
 import { SOLANA_TOKEN_PROGRAM_IDS, type TokenProgram } from "../../types/solana";
 import { HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS } from "./heliusTransaction";
+import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
+import type { SolanaTelemetryRequestOutcome } from "../../types/solanaReportOperationalTelemetry";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "token-accounts";
@@ -16,7 +18,7 @@ type JsonObject = Record<string, unknown>;
 type AcquisitionFailureReason = "request_timeout" | "provider_error" | "malformed_response";
 
 class PageRequestFailure extends Error {
-  constructor(readonly reason: AcquisitionFailureReason) {
+  constructor(readonly reason: AcquisitionFailureReason, readonly observationOutcome: SolanaTelemetryRequestOutcome) {
     super("Solana token-account page acquisition failed.");
     this.name = "PageRequestFailure";
   }
@@ -60,70 +62,90 @@ async function requestPage(
   fetchImpl: typeof fetch,
   timeoutMs: number,
   programId: string,
+  observationContext?: SolanaProviderRequestObservationContext,
 ): Promise<RawSolanaTokenAccountPage> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    let response: Response;
-    try {
-      response = await fetchImpl(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: requestBody,
-      });
-    } catch {
-      throw new PageRequestFailure(controller.signal.aborted ? "request_timeout" : "provider_error");
-    }
+    return await observeProviderRequest(
+      observationContext,
+      { section: "holders", provider: "helius", operation: "getProgramAccountsV2" },
+      async () => {
+        try {
+          return await fetchImpl(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: requestBody,
+          });
+        } catch {
+          throw new PageRequestFailure(
+            controller.signal.aborted ? "request_timeout" : "provider_error",
+            controller.signal.aborted ? "request_timeout" : "transport_error",
+          );
+        }
+      },
+      async (response) => {
+        if (controller.signal.aborted) throw new PageRequestFailure("request_timeout", "request_timeout");
+        if (!response.ok) throw new PageRequestFailure("provider_error", "http_error");
 
-    if (controller.signal.aborted) throw new PageRequestFailure("request_timeout");
-    if (!response.ok) throw new PageRequestFailure("provider_error");
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch {
+          throw new PageRequestFailure(
+            controller.signal.aborted ? "request_timeout" : "malformed_response",
+            controller.signal.aborted ? "request_timeout" : "malformed_response",
+          );
+        }
+        if (controller.signal.aborted) throw new PageRequestFailure("request_timeout", "request_timeout");
 
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new PageRequestFailure(controller.signal.aborted ? "request_timeout" : "malformed_response");
-    }
-    if (controller.signal.aborted) throw new PageRequestFailure("request_timeout");
+        if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
+          throw new PageRequestFailure("malformed_response", "malformed_response");
+        }
+        if ("error" in payload) {
+          const rpcError = payload.error;
+          if (isJsonObject(rpcError) && typeof rpcError.code === "number") {
+            throw new PageRequestFailure("provider_error", "rpc_error");
+          }
+          throw new PageRequestFailure("malformed_response", "malformed_response");
+        }
 
-    if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
-      throw new PageRequestFailure("malformed_response");
-    }
-    if ("error" in payload) {
-      const rpcError = payload.error;
-      if (isJsonObject(rpcError) && typeof rpcError.code === "number") {
-        throw new PageRequestFailure("provider_error");
-      }
-      throw new PageRequestFailure("malformed_response");
-    }
+        const result = payload.result;
+        if (!isJsonObject(result) || !isJsonObject(result.context) || !isJsonObject(result.value)) {
+          throw new PageRequestFailure("malformed_response", "malformed_response");
+        }
 
-    const result = payload.result;
-    if (!isJsonObject(result) || !isJsonObject(result.context) || !isJsonObject(result.value)) {
-      throw new PageRequestFailure("malformed_response");
-    }
+        const contextSlot = result.context.slot;
+        const page = result.value;
+        if (!Number.isSafeInteger(contextSlot) || (contextSlot as number) < 0 || !Array.isArray(page.accounts)) {
+          throw new PageRequestFailure("malformed_response", "malformed_response");
+        }
+        if (page.accounts.length > PAGE_LIMIT) throw new PageRequestFailure("malformed_response", "malformed_response");
+        if (page.paginationKey !== null && (typeof page.paginationKey !== "string" || !isBase58Syntax(page.paginationKey))) {
+          throw new PageRequestFailure("malformed_response", "malformed_response");
+        }
 
-    const contextSlot = result.context.slot;
-    const page = result.value;
-    if (!Number.isSafeInteger(contextSlot) || (contextSlot as number) < 0 || !Array.isArray(page.accounts)) {
-      throw new PageRequestFailure("malformed_response");
-    }
-    if (page.accounts.length > PAGE_LIMIT) throw new PageRequestFailure("malformed_response");
-    if (page.paginationKey !== null && (typeof page.paginationKey !== "string" || !isBase58Syntax(page.paginationKey))) {
-      throw new PageRequestFailure("malformed_response");
-    }
+        let accounts: RawSolanaTokenAccount[];
+        try {
+          accounts = page.accounts.map((account) => parseProviderAccount(account, programId));
+        } catch {
+          throw new PageRequestFailure("malformed_response", "malformed_response");
+        }
 
-    let accounts: RawSolanaTokenAccount[];
-    try {
-      accounts = page.accounts.map((account) => parseProviderAccount(account, programId));
-    } catch {
-      throw new PageRequestFailure("malformed_response");
-    }
-
-    return { accounts, paginationKey: page.paginationKey as string | null, contextSlot: contextSlot as number };
+        return { accounts, paginationKey: page.paginationKey as string | null, contextSlot: contextSlot as number };
+      },
+      (error, responseReceived) => {
+        if (error instanceof PageRequestFailure) return error.observationOutcome;
+        return responseReceived ? "malformed_response" : "transport_error";
+      },
+    );
   } catch (error: unknown) {
     if (error instanceof PageRequestFailure) throw error;
-    throw new PageRequestFailure(controller.signal.aborted ? "request_timeout" : "provider_error");
+    throw new PageRequestFailure(
+      controller.signal.aborted ? "request_timeout" : "provider_error",
+      controller.signal.aborted ? "request_timeout" : "transport_error",
+    );
   } finally {
     clearTimeout(timeout);
   }
@@ -160,6 +182,7 @@ export async function getSolanaTokenAccountPages(
   tokenProgram: TokenProgram,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS,
+  observationContext?: SolanaProviderRequestObservationContext,
 ): Promise<SolanaTokenAccountAcquisitionResult> {
   if (!isSolanaPublicKeySyntax(mintAddress)) {
     throw new Error("A resolved Solana mint address is required for token-account enumeration.");
@@ -208,6 +231,7 @@ export async function getSolanaTokenAccountPages(
         fetchImpl,
         timeoutMs,
         programId,
+        observationContext,
       );
     } catch (error: unknown) {
       return stopAfterFailure(pages, error instanceof PageRequestFailure ? error.reason : "provider_error");

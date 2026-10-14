@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { getHeliusTransaction, HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS, HeliusTransactionProviderError } from "../providers/solana/heliusTransaction";
+import type { SolanaProviderRequestObservationContext } from "../providers/providerRequestObservation";
 import { normalizeSolanaTransactionEvidence, SolanaTransactionNormalizationError } from "../normalization/solanaTransactionEvidence";
 import { resolveSolanaHistoricalTransactionSourceReference, validateSolanaHistoricalTransactionSelection } from "../normalization/solanaHistoricalTransactionSelector";
 import type { SolanaBoundedHistoricalSamplingEvidence } from "../types/solanaHistoricalSampling";
@@ -11,6 +12,8 @@ import type { SolanaTransactionEnrichmentAcquisition, SolanaTransactionEnrichmen
 export interface ExecuteSolanaTransactionEnrichmentOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Optional report-local observations passed to the provider fetch boundary. */
+  requestObservationContext?: SolanaProviderRequestObservationContext;
   now?: () => Date;
 }
 
@@ -87,7 +90,7 @@ export async function executeSolanaTransactionEnrichment(
     const source = provenance(candidate.signature, now().toISOString());
     let acquired: Awaited<ReturnType<typeof getHeliusTransaction>>;
     try {
-      acquired = await getHeliusTransaction(candidate.signature, countedFetch, timeoutMs);
+      acquired = await getHeliusTransaction(candidate.signature, countedFetch, timeoutMs, options.requestObservationContext);
     } catch (error: unknown) {
       if (error instanceof HeliusTransactionProviderError) {
         const acquisition = safeProviderFailure(error, source);

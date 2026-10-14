@@ -1,4 +1,5 @@
 import { isSolanaPublicKeySyntax } from "../../validation/solanaAddress";
+import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = 1;
@@ -61,6 +62,7 @@ export async function getSolanaAccount(
   address: string,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS,
+  observationContext?: SolanaProviderRequestObservationContext,
 ): Promise<RawSolanaAccount | null> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new SolanaAccountProviderError("configuration_error");
@@ -81,79 +83,91 @@ export async function getSolanaAccount(
   }, timeoutMs);
 
   try {
-    let response: Response;
-    try {
-      response = await fetchImpl(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: RPC_REQUEST_ID,
-          method: "getAccountInfo",
-          params: [address, { encoding: "base64" }],
-        }),
-      });
-    } catch {
-      if (timedOut) throw new SolanaAccountProviderError("request_timeout");
-      throw new SolanaAccountProviderError("transport_error");
-    }
+    return await observeProviderRequest(
+      observationContext,
+      { section: "mint", provider: "helius", operation: "getAccountInfo" },
+      async () => {
+        try {
+          return await fetchImpl(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: RPC_REQUEST_ID,
+              method: "getAccountInfo",
+              params: [address, { encoding: "base64" }],
+            }),
+          });
+        } catch {
+          if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+          throw new SolanaAccountProviderError("transport_error");
+        }
+      },
+      async (response) => {
+        if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+        if (!response.ok) throw new SolanaAccountProviderError("http_error", response.status);
 
-    if (timedOut) throw new SolanaAccountProviderError("request_timeout");
-    if (!response.ok) throw new SolanaAccountProviderError("http_error", response.status);
+        let payload: unknown;
+        try {
+          payload = await response.json();
+        } catch {
+          if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+          throw new SolanaAccountProviderError("malformed_response");
+        }
 
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      if (timedOut) throw new SolanaAccountProviderError("request_timeout");
-      throw new SolanaAccountProviderError("malformed_response");
-    }
+        if (timedOut) throw new SolanaAccountProviderError("request_timeout");
+        if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
+          throw new SolanaAccountProviderError("malformed_response");
+        }
 
-    if (timedOut) throw new SolanaAccountProviderError("request_timeout");
-    if (!isJsonObject(payload) || payload.jsonrpc !== "2.0" || payload.id !== RPC_REQUEST_ID) {
-      throw new SolanaAccountProviderError("malformed_response");
-    }
+        if ("error" in payload) {
+          const rpcError = payload.error;
+          if (isJsonObject(rpcError) && Number.isSafeInteger(rpcError.code)) {
+            throw new SolanaAccountProviderError("rpc_error", null, rpcError.code as number);
+          }
+          throw new SolanaAccountProviderError("malformed_response");
+        }
 
-    if ("error" in payload) {
-      const rpcError = payload.error;
-      if (isJsonObject(rpcError) && Number.isSafeInteger(rpcError.code)) {
-        throw new SolanaAccountProviderError("rpc_error", null, rpcError.code as number);
-      }
-      throw new SolanaAccountProviderError("malformed_response");
-    }
+        const result = payload.result;
+        if (
+          !isJsonObject(result) ||
+          !isJsonObject(result.context) ||
+          !Number.isSafeInteger(result.context.slot) ||
+          (result.context.slot as number) < 0 ||
+          !("value" in result)
+        ) {
+          throw new SolanaAccountProviderError("malformed_response");
+        }
 
-    const result = payload.result;
-    if (
-      !isJsonObject(result) ||
-      !isJsonObject(result.context) ||
-      !Number.isSafeInteger(result.context.slot) ||
-      (result.context.slot as number) < 0 ||
-      !("value" in result)
-    ) {
-      throw new SolanaAccountProviderError("malformed_response");
-    }
+        if (result.value === null) return null;
+        if (!isJsonObject(result.value) || typeof result.value.owner !== "string" || !isSolanaPublicKeySyntax(result.value.owner)) {
+          throw new SolanaAccountProviderError("malformed_response");
+        }
 
-    if (result.value === null) return null;
-    if (!isJsonObject(result.value) || typeof result.value.owner !== "string" || !isSolanaPublicKeySyntax(result.value.owner)) {
-      throw new SolanaAccountProviderError("malformed_response");
-    }
+        const accountData = result.value.data;
+        if (
+          !Array.isArray(accountData) ||
+          typeof accountData[0] !== "string" ||
+          accountData[1] !== "base64" ||
+          !isCanonicalBase64(accountData[0])
+        ) {
+          throw new SolanaAccountProviderError("malformed_response");
+        }
 
-    const accountData = result.value.data;
-    if (
-      !Array.isArray(accountData) ||
-      typeof accountData[0] !== "string" ||
-      accountData[1] !== "base64" ||
-      !isCanonicalBase64(accountData[0])
-    ) {
-      throw new SolanaAccountProviderError("malformed_response");
-    }
-
-    return {
-      requestedAddress: address,
-      owner: result.value.owner,
-      dataBase64: accountData[0],
-    };
+        return { requestedAddress: address, owner: result.value.owner, dataBase64: accountData[0] };
+      },
+      (error, responseReceived) => {
+        if (error instanceof SolanaAccountProviderError) {
+          if (error.category === "request_timeout") return "request_timeout";
+          if (error.category === "http_error") return "http_error";
+          if (error.category === "rpc_error") return "rpc_error";
+          if (error.category === "malformed_response") return "malformed_response";
+          if (error.category === "transport_error") return "transport_error";
+        }
+        return responseReceived ? "malformed_response" : "transport_error";
+      },
+    );
   } finally {
     clearTimeout(timeout);
   }
