@@ -216,6 +216,11 @@ export interface SolanaHolderPresentationSection extends SolanaTokenEvidencePres
     distinctBalanceCount: number;
     repeatedBalanceGroups: SolanaHolderRepeatedBalanceGroup[];
     repeatedBalanceGroupsOmitted: number;
+    coverage: {
+      state: "complete" | "partial";
+      /** Source amount-coverage reason; null means the source supplied no reason. */
+      reason: "unsupported_balance_affecting_extension" | "supply_inconsistency" | null;
+    };
   } | null;
 }
 
@@ -246,7 +251,13 @@ export interface SolanaHistoricalAuthorityPresentation {
   acceptedObservationCountBasis: "retained_observation_rows";
   pages: SolanaHistoricalPagePresentation[];
   observedBlockTimeBounds: { minimumUnixSeconds: number; maximumUnixSeconds: number; spanSeconds: number } | null;
+  observedBlockTimeBoundsStatus: "available" | "unavailable" | "unknown";
+  observedBlockTimeBoundsReason: "not_queried" | "provider_error" | "no_usable_block_times" | "metrics_not_available" | null;
+  observedBlockTimeBoundsQueryCompleteness: "complete" | "partial" | null;
   distinctSignatureCount: number | null;
+  distinctSignatureCountStatus: "available" | "unavailable" | "unknown";
+  distinctSignatureCountReason: "not_queried" | "provider_error" | "no_usable_block_times" | "metrics_not_available" | null;
+  distinctSignatureCountQueryCompleteness: "complete" | "partial" | null;
   amountEvidence: {
     status: "available" | "unavailable";
     reason: string | null;
@@ -301,6 +312,7 @@ export interface SolanaTokenEvidencePresentationV1 {
     name: null;
     symbol: null;
   };
+  limitations: string[];
   sections: [
     SolanaIdentityPresentationSection,
     SolanaMarketPresentationSection,
@@ -308,4 +320,3 @@ export interface SolanaTokenEvidencePresentationV1 {
     SolanaHistoricalPresentationSection,
   ];
 }
-

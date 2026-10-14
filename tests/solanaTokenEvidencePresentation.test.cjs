@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { presentSolanaTokenEvidenceReport } = require("../dist/application/solanaTokenEvidencePresentation.js");
 const { generateSolanaTokenEvidenceReport } = require("../dist/application/solanaTokenEvidenceReport.js");
+const { normalizeMarketSnapshot } = require("../dist/normalization/marketSnapshot.js");
 
 const MINT = "11111111111111111111111111111111";
 const AUTHORITY = "Vote111111111111111111111111111111111111111";
@@ -232,6 +233,7 @@ test("emits exact v1 schema, Solana chain, fixed ordered sections, and null unsu
     ["identity_mint", "Identity and mint"], ["market", "Market"], ["holders", "Holders"], ["historical", "Historical evidence"],
   ]);
   assert.deepEqual(result.token, { requestedMintAddress: MINT, name: null, symbol: null });
+  assert.deepEqual(result.limitations, ["Mint, market, holder, and historical observations can originate from different acquisition times or context slots; this assembled report is not an atomic, same-time or same-slot snapshot."]);
 });
 
 test("identity fields use a fixed allowlisted order", () => {
@@ -319,6 +321,7 @@ test("successful empty market result is not represented as unavailable or zero l
   assert.equal(primary.reason, "no_eligible_pools");
   assert.equal(primary.displayValue, "No primary pool selected");
   assert.ok(result.limitations.some((text) => text.includes("no eligible pools")));
+  assert.ok(result.limitations.some((text) => text.includes("available USD liquidity") && text.includes("not guaranteed to represent every market")));
 });
 
 test("snapshot-level and pool-level market fields retain their own observation times", () => {
@@ -406,12 +409,30 @@ test("fully complete holder acquisition, enumeration, amount coverage, and distr
 test("partial distribution coverage keeps holder section partial despite otherwise complete evidence", () => {
   const input = report();
   input.holders.evidence.ownerAuthorityBalanceDistribution.coverage.state = "partial";
+  input.holders.evidence.ownerAuthorityBalanceDistribution.coverage.amountCoverageReason = "unsupported_balance_affecting_extension";
   const result = presentSolanaTokenEvidenceReport(input).sections[2];
   assert.equal(result.sourceStatus.status, "present");
   assert.equal(result.acquisition.completeness, "complete");
   assert.equal(fieldById(result, "holders.enumeration_completeness").value, "complete");
   assert.equal(fieldById(result, "holders.amount_coverage_state").value, "complete");
   assert.equal(result.completeness, "partial");
+  assert.deepEqual(result.balanceDistribution.coverage, { state: "partial", reason: "unsupported_balance_affecting_extension" });
+  assert.ok(result.limitations.some((text) => text.includes("unadjusted") && text.includes("LP, pool, treasury, custodial")));
+});
+
+test("complete distribution coverage is exposed with its source-null reason unchanged", () => {
+  const result = presentSolanaTokenEvidenceReport(report()).sections[2];
+  assert.equal(result.completeness, "complete");
+  assert.deepEqual(result.balanceDistribution.coverage, { state: "complete", reason: null });
+});
+
+test("partial distribution coverage with no source reason does not invent one", () => {
+  const input = report();
+  input.holders.evidence.ownerAuthorityBalanceDistribution.coverage.state = "partial";
+  input.holders.evidence.ownerAuthorityBalanceDistribution.coverage.amountCoverageReason = null;
+  const result = presentSolanaTokenEvidenceReport(input).sections[2];
+  assert.equal(result.completeness, "partial");
+  assert.deepEqual(result.balanceDistribution.coverage, { state: "partial", reason: null });
 });
 
 test("missing optional holder coverage reason remains unknown instead of available-null", () => {
@@ -514,6 +535,21 @@ test("historical presentation exposes bounded scope and never claims token-wide 
   assert.equal(result.authorities[0].terminalReason, "page_and_record_caps");
 });
 
+test("historical fetch field is labeled as application query time, separate from returned block times", () => {
+  const input = report({ historicalTransactions: historyEvidence() });
+  const history = input.historicalTransactions.evidence;
+  const applicationFetch = "2026-10-14T13:00:00.000Z";
+  history.execution.evidence.provenance.fetchedAt = applicationFetch;
+  history.execution.evidence.authorities[0].observations[0].observedTime.unixSeconds = 100;
+  const section = presentSolanaTokenEvidenceReport(input).sections[3];
+  const fetch = fieldById(section, "historical.provider_fetch_time");
+  assert.equal(fetch.label, "Application query fetch time");
+  assert.equal(fetch.value, applicationFetch);
+  assert.equal(fetch.provenance.sourcePath, "report.historicalTransactions.evidence.execution.evidence.provenance.fetchedAt");
+  assert.equal(fetch.provenance.observedAt, applicationFetch);
+  assert.equal(section.authorities[0].pages[0].firstUsableBlockTime, 100);
+});
+
 test("historical page metadata retains provider order/range evidence without cursor values", () => {
   const result = presentSolanaTokenEvidenceReport(report({ historicalTransactions: historyEvidence() })).sections[3];
   assert.deepEqual(result.authorities[0].pages[0], {
@@ -570,6 +606,104 @@ test("successful empty historical authority query remains distinct from unavaila
   assert.equal(result.terminalReason, "natural_termination");
   assert.equal(result.acceptedObservationCount, 0);
   assert.equal(result.amountEvidence.status, "unavailable");
+  assert.equal(result.distinctSignatureCount, 0);
+  assert.equal(result.distinctSignatureCountStatus, "available");
+  assert.equal(result.distinctSignatureCountReason, null);
+  assert.equal(result.distinctSignatureCountQueryCompleteness, "complete");
+  assert.equal(result.observedBlockTimeBounds, null);
+  assert.equal(result.observedBlockTimeBoundsStatus, "unavailable");
+  assert.equal(result.observedBlockTimeBoundsReason, "no_usable_block_times");
+});
+
+test("historical metric availability and source reasons remain explicit", () => {
+  const input = report({ historicalTransactions: historyEvidence() });
+  const metrics = input.historicalTransactions.evidence.descriptiveMetrics.authorities[0];
+  metrics.distinctSignatureCount = { status: "unavailable", value: null, reason: "not_queried" };
+  metrics.observedBlockTimeBounds = { status: "unavailable", value: null, reason: "provider_error" };
+  const first = presentSolanaTokenEvidenceReport(input).sections[3].authorities[0];
+  assert.equal(first.distinctSignatureCount, null);
+  assert.equal(first.distinctSignatureCountStatus, "unavailable");
+  assert.equal(first.distinctSignatureCountReason, "not_queried");
+  assert.equal(first.observedBlockTimeBoundsStatus, "unavailable");
+  assert.equal(first.observedBlockTimeBoundsReason, "provider_error");
+
+  metrics.distinctSignatureCount = { status: "unavailable", value: null, reason: "provider_error" };
+  metrics.observedBlockTimeBounds = { status: "unavailable", value: null, reason: "no_usable_block_times" };
+  const second = presentSolanaTokenEvidenceReport(input).sections[3].authorities[0];
+  assert.equal(second.distinctSignatureCountReason, "provider_error");
+  assert.equal(second.observedBlockTimeBoundsReason, "no_usable_block_times");
+
+  metrics.distinctSignatureCount = { status: "available", value: 2, queryCompleteness: "partial" };
+  metrics.observedBlockTimeBounds = { status: "available", value: { minimumUnixSeconds: 90, maximumUnixSeconds: 100, spanSeconds: 10 }, queryCompleteness: "partial" };
+  const third = presentSolanaTokenEvidenceReport(input).sections[3].authorities[0];
+  assert.equal(third.distinctSignatureCount, 2);
+  assert.equal(third.distinctSignatureCountStatus, "available");
+  assert.equal(third.distinctSignatureCountReason, null);
+  assert.equal(third.distinctSignatureCountQueryCompleteness, "partial");
+  assert.deepEqual(third.observedBlockTimeBounds, { minimumUnixSeconds: 90, maximumUnixSeconds: 100, spanSeconds: 10 });
+  assert.equal(third.observedBlockTimeBoundsStatus, "available");
+  assert.equal(third.observedBlockTimeBoundsReason, null);
+  assert.equal(third.observedBlockTimeBoundsQueryCompleteness, "partial");
+
+  const withoutMetrics = report({ historicalTransactions: historyEvidence() });
+  withoutMetrics.historicalTransactions.evidence.descriptiveMetrics.authorities = [];
+  const unknown = presentSolanaTokenEvidenceReport(withoutMetrics).sections[3].authorities[0];
+  assert.equal(unknown.distinctSignatureCountStatus, "unknown");
+  assert.equal(unknown.distinctSignatureCountReason, "metrics_not_available");
+});
+
+test("cross-section timing caveat does not alter source timestamps or holder slots", () => {
+  const input = report({ historicalTransactions: historyEvidence() });
+  const marketTime = "2026-10-14T10:00:00.000Z";
+  const holderTime = "2026-10-14T11:00:00.000Z";
+  const historyTime = "2026-10-14T12:00:00.000Z";
+  input.market.evidence.provenance.fetchedAt = marketTime;
+  input.holders.evidence.holderStructure.fetchedAt = holderTime;
+  input.holders.evidence.holderStructure.enumeration.contextSlots = [401, 402];
+  input.holders.evidence.ownerAuthorityBalanceDistribution.coverage.sourceSnapshotAt = holderTime;
+  input.holders.evidence.ownerAuthorityBalanceDistribution.coverage.contextSlots = [401, 402];
+  input.historicalTransactions.evidence.execution.evidence.provenance.fetchedAt = historyTime;
+  const result = presentSolanaTokenEvidenceReport(input);
+  assert.match(result.limitations[0], /not an atomic, same-time or same-slot snapshot/);
+  assert.equal(fieldById(result.sections[1], "market.provider_fetch_time").value, marketTime);
+  assert.equal(result.sections[2].balanceDistributionProvenance.observedAt, holderTime);
+  assert.deepEqual(result.sections[2].contextSlots, [401, 402]);
+  assert.deepEqual(result.sections[2].balanceDistributionProvenance.contextSlots, [401, 402]);
+  assert.equal(fieldById(result.sections[3], "historical.provider_fetch_time").value, historyTime);
+});
+
+test("primary-pool explanation accompanies selected evidence without recalculating selection", () => {
+  const lower = { chainId: "solana", poolAddress: "PoolLower111111111111111111111111111111111", dexId: "dex", baseTokenAddress: MINT, quoteTokenAddress: AUTHORITY, priceUsd: "1", marketCapUsd: null, fdvUsd: null, liquidityUsd: "10", volumeUsd: { h24: "30" }, poolCreatedAt: null };
+  const selected = { ...lower, poolAddress: "PoolSelected111111111111111111111111111111", liquidityUsd: "20", volumeUsd: { h24: "1" } };
+  const normalized = normalizeMarketSnapshot("solana", MINT, [lower, selected], FETCHED);
+  const input = report({ market: { status: "present", evidence: normalized } });
+  const section = presentSolanaTokenEvidenceReport(input).sections[1];
+  assert.equal(normalized.primaryPoolAddress, selected.poolAddress);
+  assert.equal(fieldById(section, "market.primary_pool_address").value, selected.poolAddress);
+  assert.equal(section.primaryPoolAddress, selected.poolAddress);
+  assert.ok(section.limitations.some((text) => text.includes("available USD liquidity") && text.includes("then available 24-hour USD volume") && text.includes("then pool address")));
+  assert.ok(section.limitations.some((text) => text.includes("not guaranteed to represent every market") && text.includes("best trading venue")));
+});
+
+test("primary-pool explanation preserves selection with missing liquidity and address tie-breaking", () => {
+  const a = { chainId: "solana", poolAddress: "A111111111111111111111111111111111111111", dexId: "dex", baseTokenAddress: MINT, quoteTokenAddress: AUTHORITY, priceUsd: "1", marketCapUsd: null, fdvUsd: null, liquidityUsd: null, volumeUsd: { h24: "5" }, poolCreatedAt: null };
+  const b = { ...a, poolAddress: "B111111111111111111111111111111111111111" };
+  const normalized = normalizeMarketSnapshot("solana", MINT, [b, a], FETCHED);
+  const input = report({ market: { status: "present", evidence: normalized } });
+  const section = presentSolanaTokenEvidenceReport(input).sections[1];
+  assert.equal(section.primaryPoolAddress, a.poolAddress);
+  assert.equal(fieldById(section, "market.primary_pool_address").value, a.poolAddress);
+  assert.equal(fieldById(section.pools.find((item) => item.poolAddress === a.poolAddress), "market.liquidity_usd").status, "unavailable");
+  assert.ok(section.limitations.some((text) => text.includes("then pool address")));
+});
+
+test("primary-pool explanation preserves available-volume selection when liquidity is missing", () => {
+  const lower = { chainId: "solana", poolAddress: "Lower11111111111111111111111111111111111", dexId: "dex", baseTokenAddress: MINT, quoteTokenAddress: AUTHORITY, priceUsd: "1", marketCapUsd: null, fdvUsd: null, liquidityUsd: null, volumeUsd: { h24: "4" }, poolCreatedAt: null };
+  const higher = { ...lower, poolAddress: "Higher1111111111111111111111111111111111", volumeUsd: { h24: "5" } };
+  const normalized = normalizeMarketSnapshot("solana", MINT, [lower, higher], FETCHED);
+  const result = presentSolanaTokenEvidenceReport(report({ market: { status: "present", evidence: normalized } })).sections[1];
+  assert.equal(result.primaryPoolAddress, higher.poolAddress);
+  assert.ok(result.limitations.some((text) => text.includes("available USD liquidity") && text.includes("then available 24-hour USD volume")));
 });
 
 test("provider error after accepted historical pages preserves retained rows and error state", () => {
@@ -608,7 +742,7 @@ test("no qualification score, verdict, recommendation, or AI interpretation is e
   for (const forbidden of ["score", "rating", "recommendation", "verdict", "interpretation"]) {
     assert.equal(Object.hasOwn(result, forbidden), false);
   }
-  assert.deepEqual(Object.keys(result), ["schemaVersion", "sourceReportSchemaVersion", "chain", "token", "sections"]);
+  assert.deepEqual(Object.keys(result), ["schemaVersion", "sourceReportSchemaVersion", "chain", "token", "limitations", "sections"]);
 });
 
 test("operational telemetry and arbitrary nested source payloads do not leak", () => {

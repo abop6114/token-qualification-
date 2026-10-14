@@ -21,6 +21,13 @@ import type {
 } from "../types/solanaTokenEvidencePresentation";
 import { SOLANA_TOKEN_EVIDENCE_PRESENTATION_SCHEMA_VERSION } from "../types/solanaTokenEvidencePresentation";
 
+const CROSS_SECTION_TIMING_LIMITATION =
+  "Mint, market, holder, and historical observations can originate from different acquisition times or context slots; this assembled report is not an atomic, same-time or same-slot snapshot.";
+const PRIMARY_POOL_SELECTION_LIMITATION =
+  "Primary-pool selection is for deterministic reporting: available USD liquidity is considered first, then available 24-hour USD volume, then pool address; the selected pool is not guaranteed to represent every market or to be the best trading venue.";
+const UNADJUSTED_HOLDER_LIMITATION =
+  "The presented owner-authority distribution and concentration are unadjusted; no LP, pool, treasury, custodial, or other unresolved roles are excluded.";
+
 type FieldInput = {
   id: SolanaPresentationField["id"];
   label: string;
@@ -332,7 +339,7 @@ function marketSection(report: SolanaTokenEvidenceReport) {
       label: "Market",
       sourceStatus: state,
       completeness: "not_established" as const,
-      limitations: ["No market snapshot is present in the assembled report."],
+      limitations: ["No market snapshot is present in the assembled report.", PRIMARY_POOL_SELECTION_LIMITATION],
       fields: [
         unknownField("market.source_updated_at", "Provider source update time", "market_snapshot_not_present", "report.market.evidence.provenance.sourceUpdatedAt"),
         unknownField("market.provider_fetch_time", "Market provider fetch time", "market_snapshot_not_present", "report.market.evidence.provenance.fetchedAt"),
@@ -381,8 +388,8 @@ function marketSection(report: SolanaTokenEvidenceReport) {
     sourceStatus: sourceStatus(report.market),
     completeness: "not_established" as const,
     limitations: snapshot.pools.length === 0
-      ? ["The successful market lookup returned no eligible pools; absence is not a reported zero market metric."]
-      : ["Pool metrics remain per-pool observations; no cross-pool liquidity or volume aggregation is presented."],
+      ? ["The successful market lookup returned no eligible pools; absence is not a reported zero market metric.", PRIMARY_POOL_SELECTION_LIMITATION]
+      : ["Pool metrics remain per-pool observations; no cross-pool liquidity or volume aggregation is presented.", PRIMARY_POOL_SELECTION_LIMITATION],
     fields,
     pools: snapshot.pools.map((pool, index) => ({
       poolAddress: pool.poolAddress,
@@ -423,7 +430,7 @@ function holderSection(report: SolanaTokenEvidenceReport) {
       label: "Holders",
       sourceStatus: sourceStatus(report.holders),
       completeness: "not_established" as const,
-      limitations: ["Holder evidence is not present in the assembled report."],
+      limitations: ["Holder evidence is not present in the assembled report.", UNADJUSTED_HOLDER_LIMITATION],
       fields: [
         unknownField("holders.token_account_count", "Observed token-account count", "holder_evidence_not_present", "report.holders.evidence.holderStructure.tokenAccountCount"),
         unknownField("holders.positive_balance_owner_authority_count", "Observed positive-balance owner-authority count", "holder_evidence_not_present", "report.holders.evidence.holderStructure.rawOwnerCount"),
@@ -502,6 +509,7 @@ function holderSection(report: SolanaTokenEvidenceReport) {
     completeness: coverageComplete ? "complete" as const : "partial" as const,
     limitations: [
       "Population means positive-balance token-account owner authorities; it does not establish wallets, people, beneficial owners, or economic holders.",
+      UNADJUSTED_HOLDER_LIMITATION,
       "Enumeration page context slots are preserved; they do not imply one atomic snapshot.",
       ...(structure.amountCoverage.unsupportedExtensionTypes.length > 0 ? ["Unsupported balance-affecting Token-2022 extensions limit amount coverage."] : []),
       ...(structure.amountCoverage.reason === "supply_inconsistency" ? ["Observed positive balances are inconsistent with current mint supply."] : []),
@@ -535,12 +543,28 @@ function holderSection(report: SolanaTokenEvidenceReport) {
       distinctBalanceCount: distribution.distinctBalanceCount,
       repeatedBalanceGroups: distribution.repeatedBalanceGroups.map((group) => ({ ...group })),
       repeatedBalanceGroupsOmitted: distribution.repeatedBalanceGroupsOmitted,
+      coverage: {
+        state: distribution.coverage.state,
+        reason: distribution.coverage.amountCoverageReason,
+      },
     },
   };
 }
 
 function metricNumber<T extends string | number | object>(metric: SolanaHistoricalMetricValue<T>): T | null {
   return metric.status === "available" ? metric.value : null;
+}
+
+type HistoricalMetricPresentationState = {
+  status: "available" | "unavailable" | "unknown";
+  reason: "not_queried" | "provider_error" | "no_usable_block_times" | "metrics_not_available" | null;
+};
+
+function historicalMetricState<T>(metric: SolanaHistoricalMetricValue<T> | undefined): HistoricalMetricPresentationState {
+  if (metric === undefined) return { status: "unknown", reason: "metrics_not_available" };
+  return metric.status === "available"
+    ? { status: "available", reason: null }
+    : { status: "unavailable", reason: metric.reason };
 }
 
 function presentAuthority(
@@ -586,7 +610,13 @@ function presentAuthority(
       recordsWithoutUsableBlockTime: page.recordsWithoutUsableBlockTime,
     })),
     observedBlockTimeBounds: bounds,
+    observedBlockTimeBoundsStatus: historicalMetricState(m?.observedBlockTimeBounds).status,
+    observedBlockTimeBoundsReason: historicalMetricState(m?.observedBlockTimeBounds).reason,
+    observedBlockTimeBoundsQueryCompleteness: m?.observedBlockTimeBounds.status === "available" ? m.observedBlockTimeBounds.queryCompleteness : null,
     distinctSignatureCount: m ? metricNumber(m.distinctSignatureCount) : null,
+    distinctSignatureCountStatus: historicalMetricState(m?.distinctSignatureCount).status,
+    distinctSignatureCountReason: historicalMetricState(m?.distinctSignatureCount).reason,
+    distinctSignatureCountQueryCompleteness: m?.distinctSignatureCount.status === "available" ? m.distinctSignatureCount.queryCompleteness : null,
     amountEvidence: {
       status: amount ? "available" : "unavailable",
       reason: amount ? null : m?.amountEvidenceProfile.status === "unavailable" ? m.amountEvidenceProfile.reason : "metrics_not_available",
@@ -628,7 +658,7 @@ function historicalSection(report: SolanaTokenEvidenceReport) {
   const fields: SolanaPresentationField[] = [
     directField("historical.window_start_inclusive", "Requested window start (inclusive)", evidence.provenance.requestedWindow.fromUnixSecondsInclusive, "report.historicalTransactions.evidence.execution.evidence.provenance.requestedWindow.fromUnixSecondsInclusive", String(evidence.provenance.requestedWindow.fromUnixSecondsInclusive), { unit: "Unix seconds", ...provenanceOptions }),
     directField("historical.window_end_exclusive", "Requested window end (exclusive)", evidence.provenance.requestedWindow.toUnixSecondsExclusive, "report.historicalTransactions.evidence.execution.evidence.provenance.requestedWindow.toUnixSecondsExclusive", String(evidence.provenance.requestedWindow.toUnixSecondsExclusive), { unit: "Unix seconds", ...provenanceOptions }),
-    directField("historical.provider_fetch_time", "Historical provider fetch time", evidence.provenance.fetchedAt, "report.historicalTransactions.evidence.execution.evidence.provenance.fetchedAt", evidence.provenance.fetchedAt, { unit: "ISO 8601 time", ...provenanceOptions }),
+    directField("historical.provider_fetch_time", "Application query fetch time", evidence.provenance.fetchedAt, "report.historicalTransactions.evidence.execution.evidence.provenance.fetchedAt", evidence.provenance.fetchedAt, { unit: "ISO 8601 time", ...provenanceOptions }),
     scope.candidateAuthorityCount === null
       ? unknownField("historical.candidate_authority_count", "Candidate authority count", "candidate_count_unknown", "report.historicalTransactions.evidence.execution.evidence.authorityScope.candidateAuthorityCount")
       : directField("historical.candidate_authority_count", "Candidate authority count", scope.candidateAuthorityCount, "report.historicalTransactions.evidence.execution.evidence.authorityScope.candidateAuthorityCount", String(scope.candidateAuthorityCount), { unit: "owner authorities", ...provenanceOptions }),
@@ -723,6 +753,7 @@ export function presentSolanaTokenEvidenceReport(
       name: null,
       symbol: null,
     },
+    limitations: [CROSS_SECTION_TIMING_LIMITATION],
     sections: [
       identitySection(report),
       marketSection(report),
