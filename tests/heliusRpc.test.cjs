@@ -5,6 +5,8 @@ const {
   getSolanaAccount,
   SolanaAccountProviderError,
 } = require("../dist/providers/solana/heliusRpc.js");
+const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
+const { createSolanaProviderRequestBudgetController } = require("../dist/application/solanaProviderRequestBudgetController.js");
 
 const ADDRESS = "11111111111111111111111111111111";
 const OWNER = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -62,6 +64,66 @@ test("Helius account adapter preserves successful and confirmed-missing results"
     }, 500);
     assert.equal(missing, null);
     assert.equal(calls, 2);
+  });
+});
+
+test("protected mint dispatch denies before fetch and emits no attempted request observation", async () => {
+  await withApiKey(async () => {
+    let calls = 0;
+    let authorizations = 0;
+    const events = [];
+    const denial = new SolanaProviderRequestBudgetError("insufficient_allowance");
+    const capability = { mode: "protected", authorizeFetchInvocation() { authorizations += 1; throw denial; } };
+    const context = { allocateRequestSequence: () => 1, observeRequest: (event) => { events.push(event); }, onObservationLimitation() {} };
+    await assert.rejects(getSolanaAccount(ADDRESS, async () => { calls += 1; return response(rpcResult(null)); }, 500, context, undefined, capability), (error) => error === denial);
+    assert.equal(authorizations, 1);
+    assert.equal(calls, 0);
+    assert.deepEqual(events, []);
+  });
+});
+
+test("protected mint authorization runs once for a successful fetch and malformed protected capability fails closed", async () => {
+  await withApiKey(async () => {
+    let authorizations = 0;
+    let calls = 0;
+    const result = await getSolanaAccount(ADDRESS, async () => { calls += 1; return response(rpcResult(null)); }, 500,
+      undefined, undefined, { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } });
+    assert.equal(result, null);
+    assert.equal(authorizations, 1);
+    assert.equal(calls, 1);
+
+    await assert.rejects(getSolanaAccount(ADDRESS, async () => { calls += 1; }, 500,
+      undefined, undefined, { mode: "protected" }), (error) => {
+      assert.ok(error instanceof SolanaProviderRequestBudgetError);
+      assert.equal(error.reason, "internal_operational_failure");
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+});
+
+test("caller cancellation observable before authorization consumes no unit", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let authorizations = 0;
+  let calls = 0;
+  await assert.rejects(getSolanaAccount(ADDRESS, async () => { calls += 1; }, 500, undefined, controller.signal,
+    { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } }), /cancel/i);
+  assert.equal(authorizations, 0);
+  assert.equal(calls, 0);
+});
+
+test("successful authorization remains consumed when fetch throws synchronously", async () => {
+  await withApiKey(async () => {
+    const controller = createSolanaProviderRequestBudgetController({ capacity: 1, initiallyEnabled: true });
+    const lease = controller.reserve(1);
+    await assert.rejects(getSolanaAccount(ADDRESS, async () => { throw new Error("simulated local fetch failure"); }, 500,
+      undefined, undefined, { mode: "protected", authorizeFetchInvocation: () => lease.consume() }), (error) => {
+      assertSanitized(error, "transport_error");
+      return true;
+    });
+    assert.equal(lease.getStatus().consumed, 1);
+    assert.equal(controller.getStatus().available, 0);
   });
 });
 

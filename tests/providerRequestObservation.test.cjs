@@ -13,6 +13,7 @@ const { createSolanaHistoricalTransactionSelection } = require("../dist/normaliz
 const { executeSolanaTransactionEnrichment } = require("../dist/execution/solanaTransactionEnrichment.js");
 const { aggregateSolanaReportOperationalTelemetry } = require("../dist/application/solanaReportOperationalTelemetry.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
+const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
 
 const FAKE_KEY = "synthetic-test-key-not-a-credential";
 const ADDRESS = "11111111111111111111111111111111";
@@ -73,6 +74,22 @@ function assertEvent(event, expected) {
   }, expected);
   assert.equal(event.elapsedMs === null || (Number.isFinite(event.elapsedMs) && event.elapsedMs >= 0), true);
 }
+
+test("pre-dispatch budget denial has no provider observation while legacy telemetry remains optional", async () => {
+  await withApiKey(async () => {
+    const denial = new SolanaProviderRequestBudgetError("lease_exhausted");
+    let fetchCalls = 0;
+    const recorder = observationContext();
+    await assert.rejects(getSolanaAccount(ADDRESS, async () => { fetchCalls += 1; return response(rpcAccount(null)); }, 500,
+      recorder.context, undefined, { mode: "protected", authorizeFetchInvocation() { throw denial; } }), (error) => error === denial);
+    assert.equal(fetchCalls, 0);
+    assert.deepEqual(recorder.events, []);
+
+    const legacy = await getSolanaAccount(ADDRESS, async () => { fetchCalls += 1; return response(rpcAccount(null)); }, 500);
+    assert.equal(legacy, null);
+    assert.equal(fetchCalls, 1);
+  });
+});
 
 test("existing callers without observation context preserve provider results", async () => {
   await withApiKey(async () => {

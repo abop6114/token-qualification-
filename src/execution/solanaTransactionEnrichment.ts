@@ -9,6 +9,11 @@ import type { SolanaHistoricalTransactionSelectionEvidence } from "../types/sola
 import type { SolanaTransactionRequestProvenance } from "../types/solanaTransactionEvidence";
 import type { SolanaTransactionEnrichmentAcquisition, SolanaTransactionEnrichmentExecutionResult, SolanaTransactionEnrichmentCandidateResult } from "../types/solanaTransactionEnrichment";
 import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../types/solanaTrustedExecutionContext";
+import {
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../types/solanaProviderRequestBudget";
 
 export interface ExecuteSolanaTransactionEnrichmentOptions {
   fetchImpl?: typeof fetch;
@@ -17,6 +22,8 @@ export interface ExecuteSolanaTransactionEnrichmentOptions {
   requestObservationContext?: SolanaProviderRequestObservationContext;
   now?: () => Date;
   signal?: AbortSignal;
+  /** Explicit protected dispatch capability; defaults to the legacy path for compatibility. */
+  dispatchCapability?: SolanaProviderDispatchCapability;
 }
 
 function elapsedMs(start: number): number {
@@ -65,6 +72,7 @@ export async function executeSolanaTransactionEnrichment(
   const now = options.now ?? (() => new Date());
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS;
+  const dispatchCapability = options.dispatchCapability ?? TRUSTED_LEGACY_PROVIDER_DISPATCH;
   let requestCount = 0;
   let attemptedSignatureCount = 0;
   let returnedTransactionCount = 0;
@@ -94,9 +102,9 @@ export async function executeSolanaTransactionEnrichment(
     const source = provenance(candidate.signature, now().toISOString());
     let acquired: Awaited<ReturnType<typeof getHeliusTransaction>>;
     try {
-      acquired = await getHeliusTransaction(candidate.signature, countedFetch, timeoutMs, options.requestObservationContext, options.signal);
+      acquired = await getHeliusTransaction(candidate.signature, countedFetch, timeoutMs, options.requestObservationContext, options.signal, dispatchCapability);
     } catch (error: unknown) {
-      if (error instanceof SolanaExecutionCancelledError) throw error;
+      if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
       if (error instanceof HeliusTransactionProviderError) {
         const acquisition = safeProviderFailure(error, source);
         if (acquisition.status === "request_timeout") requestTimeoutCount += 1;

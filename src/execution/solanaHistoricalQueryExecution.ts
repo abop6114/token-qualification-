@@ -15,6 +15,11 @@ import type { SolanaHistoricalQueryPlan, SolanaHistoricalQueryPlanV2, SolanaHist
 import { isSolanaPublicKeySyntax } from "../validation/solanaAddress";
 import { validateSolanaHistoricalQueryPlanV2 } from "../normalization/solanaHistoricalQueryPlan";
 import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../types/solanaTrustedExecutionContext";
+import {
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../types/solanaProviderRequestBudget";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
@@ -57,6 +62,8 @@ export interface ExecuteSolanaHistoricalQueryPlanOptions {
   now?: () => number;
   /** Trusted caller cancellation; never stored in the query plan or evidence. */
   signal?: AbortSignal;
+  /** Explicit protected dispatch capability; defaults to the legacy path for compatibility. */
+  dispatchCapability?: SolanaProviderDispatchCapability;
 }
 
 interface AuthorityRun {
@@ -490,7 +497,7 @@ async function executeAuthority(
       }
       cursor = page.paginationToken;
     } catch (error: unknown) {
-      if (error instanceof SolanaExecutionCancelledError) throw error;
+      if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
       return emptyProviderErrorEvidence(authorityAddress, requestCount, pages, observations, error);
     }
   }
@@ -509,8 +516,13 @@ export async function executeSolanaHistoricalQueryPlan(
   const now = options.now ?? Date.now;
   const startedAt = now();
   const fetchedAt = new Date(startedAt).toISOString();
-  const fetchPage = options.fetchPage ?? ((input, timeoutMs, observationContext) =>
-    getHeliusHistoricalTransferPage(input, timeoutMs, fetch, observationContext));
+  const dispatchCapability = options.dispatchCapability ?? TRUSTED_LEGACY_PROVIDER_DISPATCH;
+  if (dispatchCapability.mode === "protected" && options.fetchPage !== undefined) {
+    // Injected page sources have no enforceable fetch boundary; protected execution fails closed.
+    throw new SolanaProviderRequestBudgetError("internal_operational_failure");
+  }
+  const fetchPage = options.fetchPage ?? ((input, timeoutMs, observationContext, signal) =>
+    getHeliusHistoricalTransferPage(input, timeoutMs, fetch, observationContext, signal, dispatchCapability));
   const selectedInPlanOrder = plan.candidateAuthorities
     .filter((candidate) => candidate.plannedDisposition.status === "selected")
     .sort((left, right) =>

@@ -5,6 +5,7 @@ const {
   getSolanaMintMarkets,
   DexScreenerProviderError,
 } = require("../dist/providers/market/dexScreener.js");
+const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
 
 const MINT = "5CuomWu7HfqcR9z2NZ1QN7HJmRGwyp4JrFQ6SWmntaJP";
 const SECRET = "sentinel-provider-secret";
@@ -58,6 +59,36 @@ test("DEX Screener adapter preserves normalized success and valid empty results"
   }, 500);
   assert.deepEqual(empty, []);
   assert.equal(calls, 2);
+});
+
+test("protected market dispatch denial is preserved without fetch or attempted observation", async () => {
+  let calls = 0;
+  let authorizations = 0;
+  const events = [];
+  const denial = new SolanaProviderRequestBudgetError("lease_exhausted");
+  const capability = { mode: "protected", authorizeFetchInvocation() { authorizations += 1; throw denial; } };
+  const context = { allocateRequestSequence: () => 1, observeRequest: (event) => { events.push(event); }, onObservationLimitation() {} };
+  await assert.rejects(getSolanaMintMarkets(MINT, async () => { calls += 1; return response([]); }, 500, context, undefined, capability), (error) => error === denial);
+  assert.equal(authorizations, 1);
+  assert.equal(calls, 0);
+  assert.deepEqual(events, []);
+});
+
+test("protected market authorization runs once without telemetry and cancellation wins before it", async () => {
+  let calls = 0;
+  let authorizations = 0;
+  const found = await getSolanaMintMarkets(MINT, async () => { calls += 1; return response([]); }, 500,
+    undefined, undefined, { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } });
+  assert.deepEqual(found, []);
+  assert.equal(authorizations, 1);
+  assert.equal(calls, 1);
+
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(getSolanaMintMarkets(MINT, async () => { calls += 1; }, 500, undefined, controller.signal,
+    { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } }), /cancel/i);
+  assert.equal(authorizations, 1);
+  assert.equal(calls, 1);
 });
 
 test("invalid timeout fails before a DEX Screener request", async () => {

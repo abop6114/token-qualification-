@@ -1,6 +1,12 @@
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
 import { createSolanaRequestAbortScope } from "./solanaRequestAbortScope";
+import {
+  authorizeSolanaProviderDispatch,
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../../types/solanaProviderRequestBudget";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "tqe-transaction-probe";
@@ -44,6 +50,7 @@ export async function getHeliusTransaction(
   timeoutMs = HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
   callerSignal?: AbortSignal,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<HeliusTransactionResult> {
   if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
@@ -66,6 +73,7 @@ export async function getHeliusTransaction(
       { section: "transaction_enrichment", provider: "helius", operation: "getTransaction" },
       async () => {
         if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        authorizeSolanaProviderDispatch(dispatchCapability);
         requestInvoked = true;
         try {
           return await fetchImpl(endpoint, {
@@ -132,6 +140,7 @@ export async function getHeliusTransaction(
       },
       (error, responseReceived) => {
         if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
+        if (error instanceof SolanaProviderRequestBudgetError) return null;
         if (scope.isTimedOut()) return "request_timeout";
         if (error instanceof HeliusTransactionProviderError) {
           if (error.category === "request_timeout") return responseReceived ? "malformed_response" : "transport_error";
@@ -144,7 +153,7 @@ export async function getHeliusTransaction(
       },
     );
   } catch (error: unknown) {
-    if (error instanceof SolanaExecutionCancelledError) throw error;
+    if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
     if (scope.isTimedOut()) {
       throw new HeliusTransactionProviderError("request_timeout", "Helius transaction request timed out.");
     }

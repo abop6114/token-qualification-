@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const { getSolanaTokenAccountPages } = require("../dist/providers/solana/heliusTokenAccounts.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
+const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
 
 const MINT = "11111111111111111111111111111111";
 const PUBKEY = "11111111111111111111111111111111";
@@ -29,6 +30,46 @@ async function withKey(callback) {
     else process.env.HELIUS_API_KEY = previous;
   }
 }
+
+test("protected holder-page denial preserves the budget error without fetch or observation", async () => {
+  await withKey(async () => {
+    let calls = 0;
+    let authorizations = 0;
+    const events = [];
+    const denial = new SolanaProviderRequestBudgetError("insufficient_allowance");
+    const capability = { mode: "protected", authorizeFetchInvocation() { authorizations += 1; throw denial; } };
+    const context = { allocateRequestSequence: () => 1, observeRequest: (event) => { events.push(event); }, onObservationLimitation() {} };
+    await assert.rejects(getSolanaTokenAccountPages(MINT, "spl-token", async () => { calls += 1; return response(100, [], null); }, 500, context, undefined, capability), (error) => error === denial);
+    assert.equal(authorizations, 1);
+    assert.equal(calls, 0);
+    assert.deepEqual(events, []);
+  });
+});
+
+test("protected holder pagination authorizes exactly once per fetched page", async () => {
+  await withKey(async () => {
+    const pages = [response(100, [], "2"), response(101, [], null)];
+    let calls = 0;
+    let authorizations = 0;
+    const result = await getSolanaTokenAccountPages(MINT, "spl-token", async () => { calls += 1; return pages.shift(); }, 500,
+      undefined, undefined, { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } });
+    assert.equal(result.status, "available");
+    assert.equal(result.completeness, "complete");
+    assert.equal(calls, 2);
+    assert.equal(authorizations, 2);
+  });
+});
+
+test("pre-aborted holder enumeration does not authorize or fetch", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  let authorizations = 0;
+  await assert.rejects(getSolanaTokenAccountPages(MINT, "spl-token", async () => { calls += 1; }, 500,
+    undefined, controller.signal, { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } }), /cancel/i);
+  assert.equal(calls, 0);
+  assert.equal(authorizations, 0);
+});
 
 test("paginates through short pages until explicit null cursor and preserves context slots", async () => {
   await withKey(async () => {

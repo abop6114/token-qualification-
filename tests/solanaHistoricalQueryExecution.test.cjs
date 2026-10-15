@@ -9,6 +9,7 @@ const { createSolanaHolderSnapshotRecordV2 } = require("../dist/normalization/so
 const { normalizeSolanaHolderStructure } = require("../dist/normalization/solanaHolders.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
+const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
 const MINT = key(42);
@@ -108,6 +109,44 @@ function transfer(signature, amount, extra = {}) {
 }
 
 const fixedClock = () => 1_800_000_000_000;
+
+test("protected historical execution fails closed for an injected page source", async () => {
+  const plan = makePlan([100], 1);
+  let authorizationCalls = 0;
+  let pageFetches = 0;
+  await assert.rejects(executeSolanaHistoricalQueryPlan(plan, {
+    requestTimeoutMs: 5_000,
+    dispatchCapability: { mode: "protected", authorizeFetchInvocation() { authorizationCalls += 1; } },
+    fetchPage: async () => { pageFetches += 1; return { observations: [], paginationToken: null }; },
+  }), (error) => error instanceof SolanaProviderRequestBudgetError && error.reason === "internal_operational_failure");
+  assert.equal(authorizationCalls, 0);
+  assert.equal(pageFetches, 0);
+});
+
+test("historical execution propagates a budget denial instead of converting it to evidence", async () => {
+  const plan = makePlan([100], 1);
+  const denial = new SolanaProviderRequestBudgetError("lease_exhausted");
+  await assert.rejects(executeSolanaHistoricalQueryPlan(plan, {
+    requestTimeoutMs: 5_000,
+    fetchPage: async () => { throw denial; },
+  }), (error) => error === denial);
+});
+
+test("pre-aborted historical execution does not authorize or fetch a page", async () => {
+  const plan = makePlan([100], 1);
+  const controller = new AbortController();
+  controller.abort();
+  let authorizations = 0;
+  let pageFetches = 0;
+  await assert.rejects(executeSolanaHistoricalQueryPlan(plan, {
+    requestTimeoutMs: 5_000,
+    signal: controller.signal,
+    dispatchCapability: { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } },
+    fetchPage: async () => { pageFetches += 1; return { observations: [], paginationToken: null }; },
+  }), /cancel/i);
+  assert.equal(authorizations, 0);
+  assert.equal(pageFetches, 0);
+});
 
 test("executes selected authorities sequentially and assembles full-frame evidence", async () => {
   const plan = makePlan();

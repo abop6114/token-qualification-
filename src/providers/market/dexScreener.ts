@@ -2,6 +2,12 @@ import type { RawMarketPoolObservation, MarketVolumeWindow } from "../../types/m
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
 import { createSolanaRequestAbortScope } from "../solana/solanaRequestAbortScope";
+import {
+  authorizeSolanaProviderDispatch,
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../../types/solanaProviderRequestBudget";
 
 const TOKEN_PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/";
 const VOLUME_WINDOWS: readonly MarketVolumeWindow[] = ["m5", "h1", "h6", "h24"];
@@ -124,6 +130,7 @@ export async function getSolanaMintMarkets(
   timeoutMs = DEX_SCREENER_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
   callerSignal?: AbortSignal,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<RawMarketPoolObservation[]> {
   if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
@@ -139,6 +146,7 @@ export async function getSolanaMintMarkets(
       { section: "market", provider: "dexscreener", operation: "tokenPairs" },
       async () => {
         if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        authorizeSolanaProviderDispatch(dispatchCapability);
         requestInvoked = true;
         try {
           return await fetchImpl(`${TOKEN_PAIRS_URL}${encodeURIComponent(mintAddress)}`, { signal: scope.signal });
@@ -166,6 +174,7 @@ export async function getSolanaMintMarkets(
       },
       (error, responseReceived) => {
         if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
+        if (error instanceof SolanaProviderRequestBudgetError) return null;
         if (error instanceof DexScreenerProviderError) {
           if (error.category === "request_timeout") return "request_timeout";
           if (error.category === "http_error") return "http_error";

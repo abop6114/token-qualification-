@@ -2,6 +2,12 @@ import { isSolanaPublicKeySyntax } from "../../validation/solanaAddress";
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
 import { createSolanaRequestAbortScope } from "./solanaRequestAbortScope";
+import {
+  authorizeSolanaProviderDispatch,
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../../types/solanaProviderRequestBudget";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = 1;
@@ -66,6 +72,7 @@ export async function getSolanaAccount(
   timeoutMs = HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
   callerSignal?: AbortSignal,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<RawSolanaAccount | null> {
   if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
@@ -87,6 +94,7 @@ export async function getSolanaAccount(
       { section: "mint", provider: "helius", operation: "getAccountInfo" },
       async () => {
         if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        authorizeSolanaProviderDispatch(dispatchCapability);
         requestInvoked = true;
         try {
           return await fetchImpl(endpoint, {
@@ -162,6 +170,7 @@ export async function getSolanaAccount(
       },
       (error, responseReceived) => {
         if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
+        if (error instanceof SolanaProviderRequestBudgetError) return null;
         if (error instanceof SolanaAccountProviderError) {
           if (error.category === "request_timeout") return "request_timeout";
           if (error.category === "http_error") return "http_error";

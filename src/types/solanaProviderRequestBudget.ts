@@ -6,6 +6,25 @@ export type SolanaProviderRequestBudgetRejectionReason =
   | "lease_settled"
   | "internal_operational_failure";
 
+/** Synchronous capability called immediately before one provider fetch invocation. */
+export type SolanaProviderDispatchAuthorization = () => void;
+
+/**
+ * Dispatch policy is explicit: legacy/development callers remain compatible,
+ * while protected callers must provide a callback that consumes one lease unit.
+ */
+export type SolanaProviderDispatchCapability =
+  | { readonly mode: "trusted_legacy_unprotected" }
+  | {
+      readonly mode: "protected";
+      readonly authorizeFetchInvocation: SolanaProviderDispatchAuthorization;
+    };
+
+/** Existing callers remain deliberately unprotected until a protected caller opts in. */
+export const TRUSTED_LEGACY_PROVIDER_DISPATCH: SolanaProviderDispatchCapability = Object.freeze({
+  mode: "trusted_legacy_unprotected",
+});
+
 export class SolanaProviderRequestBudgetError extends Error {
   constructor(readonly reason: SolanaProviderRequestBudgetRejectionReason) {
     const messages: Record<SolanaProviderRequestBudgetRejectionReason, string> = {
@@ -18,6 +37,18 @@ export class SolanaProviderRequestBudgetError extends Error {
     super(messages[reason]);
     this.name = "SolanaProviderRequestBudgetError";
   }
+}
+
+/** Runtime fail-closed guard for untyped JavaScript callers of protected adapters. */
+export function authorizeSolanaProviderDispatch(capability: SolanaProviderDispatchCapability): void {
+  if (capability === null || typeof capability !== "object") {
+    throw new SolanaProviderRequestBudgetError("internal_operational_failure");
+  }
+  if (capability.mode === "trusted_legacy_unprotected") return;
+  if (capability.mode !== "protected" || typeof capability.authorizeFetchInvocation !== "function") {
+    throw new SolanaProviderRequestBudgetError("internal_operational_failure");
+  }
+  capability.authorizeFetchInvocation();
 }
 
 export interface SolanaProviderRequestBudgetControllerOptions {

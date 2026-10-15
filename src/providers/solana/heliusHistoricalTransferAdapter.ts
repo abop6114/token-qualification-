@@ -7,6 +7,11 @@ import {
 import type { SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
 import { createSolanaRequestAbortScope } from "./solanaRequestAbortScope";
+import {
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../../types/solanaProviderRequestBudget";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 export const HELIUS_HISTORICAL_TRANSFER_PAGE_LIMIT = 100;
@@ -28,6 +33,7 @@ export async function getHeliusHistoricalTransferPage(
   fetchImpl: typeof fetch = fetch,
   observationContext?: SolanaProviderRequestObservationContext,
   callerSignal?: AbortSignal,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<HeliusTransferPage> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new Error("Helius request timeout must be a positive integer within the supported timer range.");
@@ -54,9 +60,11 @@ export async function getHeliusHistoricalTransferPage(
       observationContext,
       () => scope.cause === "request_timeout",
       (error) => scope.isCallerAbort(error),
+      () => scope.cause === "caller_cancelled",
+      dispatchCapability,
     );
   } catch (error: unknown) {
-    if (error instanceof SolanaExecutionCancelledError) throw error;
+    if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
     if (scope.cause === "caller_cancelled" && scope.isCallerAbort(error)) {
       throw new SolanaExecutionCancelledError(requestInvoked);
     }

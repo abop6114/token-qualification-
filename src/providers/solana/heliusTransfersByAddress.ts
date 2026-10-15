@@ -1,5 +1,11 @@
 import { observeProviderRequest, type SolanaProviderRequestObservationContext } from "../providerRequestObservation";
 import { SolanaExecutionCancelledError } from "../../types/solanaTrustedExecutionContext";
+import {
+  authorizeSolanaProviderDispatch,
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../../types/solanaProviderRequestBudget";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "tqe-transfer-history-probe";
@@ -209,6 +215,8 @@ export async function getHeliusTransferPage(
   observationContext?: SolanaProviderRequestObservationContext,
   requestTimeoutObserved?: () => boolean,
   requestCancelledObserved?: (error: unknown) => boolean,
+  callerCancellationObserved?: () => boolean,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<HeliusTransferPage> {
   const apiKey = process.env.HELIUS_API_KEY;
   if (apiKey === undefined || apiKey.trim() === "") {
@@ -220,6 +228,14 @@ export async function getHeliusTransferPage(
     observationContext,
     { section: "historical_acquisition", provider: "helius", operation: "getTransfersByAddress" },
     async () => {
+      let callerCancelled = false;
+      try {
+        callerCancelled = callerCancellationObserved?.() === true;
+      } catch {
+        throw new SolanaProviderRequestBudgetError("internal_operational_failure");
+      }
+      if (callerCancelled) throw new SolanaExecutionCancelledError(false);
+      authorizeSolanaProviderDispatch(dispatchCapability);
       try {
         return await fetchImpl(endpoint, {
           method: "POST",
@@ -243,7 +259,7 @@ export async function getHeliusTransferPage(
           }),
         });
       } catch (error: unknown) {
-        if (error instanceof SolanaExecutionCancelledError) throw error;
+        if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
         throw new HeliusTransferProviderError("transport", "Helius transfer-history request failed.");
       }
     },
@@ -293,6 +309,7 @@ export async function getHeliusTransferPage(
     },
     (error, responseReceived) => {
       if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
+      if (error instanceof SolanaProviderRequestBudgetError) return null;
       try {
         if (requestTimeoutObserved?.() === true) return "request_timeout";
       } catch {

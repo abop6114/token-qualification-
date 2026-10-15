@@ -10,6 +10,12 @@ import { observeProviderRequest, type SolanaProviderRequestObservationContext } 
 import type { SolanaTelemetryRequestOutcome } from "../../types/solanaReportOperationalTelemetry";
 import { SolanaExecutionCancelledError, throwIfSolanaExecutionCancelled } from "../../types/solanaTrustedExecutionContext";
 import { createSolanaRequestAbortScope } from "./solanaRequestAbortScope";
+import {
+  authorizeSolanaProviderDispatch,
+  SolanaProviderRequestBudgetError,
+  TRUSTED_LEGACY_PROVIDER_DISPATCH,
+  type SolanaProviderDispatchCapability,
+} from "../../types/solanaProviderRequestBudget";
 
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "token-accounts";
@@ -66,6 +72,7 @@ async function requestPage(
   programId: string,
   observationContext?: SolanaProviderRequestObservationContext,
   callerSignal?: AbortSignal,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<RawSolanaTokenAccountPage> {
   if (callerSignal?.aborted) throw new SolanaExecutionCancelledError();
   const scope = createSolanaRequestAbortScope(timeoutMs, callerSignal);
@@ -76,6 +83,7 @@ async function requestPage(
       { section: "holders", provider: "helius", operation: "getProgramAccountsV2" },
       async () => {
         if (scope.cause === "caller_cancelled") throw new SolanaExecutionCancelledError(false);
+        authorizeSolanaProviderDispatch(dispatchCapability);
         requestInvoked = true;
         try {
           return await fetchImpl(endpoint, {
@@ -145,12 +153,13 @@ async function requestPage(
       },
       (error, responseReceived) => {
         if (error instanceof SolanaExecutionCancelledError) return error.requestAttempted ? "request_cancelled" : null;
+        if (error instanceof SolanaProviderRequestBudgetError) return null;
         if (error instanceof PageRequestFailure) return error.observationOutcome;
         return responseReceived ? "malformed_response" : "transport_error";
       },
     );
   } catch (error: unknown) {
-    if (error instanceof SolanaExecutionCancelledError) throw error;
+    if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
     if (error instanceof PageRequestFailure) throw error;
     throw new PageRequestFailure(
       scope.isTimedOut() ? "request_timeout" : "provider_error",
@@ -194,6 +203,7 @@ export async function getSolanaTokenAccountPages(
   timeoutMs = HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS,
   observationContext?: SolanaProviderRequestObservationContext,
   callerSignal?: AbortSignal,
+  dispatchCapability: SolanaProviderDispatchCapability = TRUSTED_LEGACY_PROVIDER_DISPATCH,
 ): Promise<SolanaTokenAccountAcquisitionResult> {
   throwIfSolanaExecutionCancelled(callerSignal === undefined ? undefined : { signal: callerSignal });
   if (!isSolanaPublicKeySyntax(mintAddress)) {
@@ -246,9 +256,10 @@ export async function getSolanaTokenAccountPages(
         programId,
         observationContext,
         callerSignal,
+        dispatchCapability,
       );
     } catch (error: unknown) {
-      if (error instanceof SolanaExecutionCancelledError) throw error;
+      if (error instanceof SolanaExecutionCancelledError || error instanceof SolanaProviderRequestBudgetError) throw error;
       return stopAfterFailure(pages, error instanceof PageRequestFailure ? error.reason : "provider_error");
     }
     throwIfSolanaExecutionCancelled(callerSignal === undefined ? undefined : { signal: callerSignal });

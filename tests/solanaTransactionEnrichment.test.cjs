@@ -9,6 +9,7 @@ const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { createSolanaHistoricalTransactionSelection, validateSolanaHistoricalTransactionSelection } = require("../dist/normalization/solanaHistoricalTransactionSelector.js");
 const { executeSolanaTransactionEnrichment } = require("../dist/execution/solanaTransactionEnrichment.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
+const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
 const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
 
 const key = (n) => encodeSolanaPublicKey(Buffer.alloc(32, n));
@@ -212,6 +213,65 @@ test("zero signatures are not applicable and produce zero provider requests", as
   assert.equal(calls, 0);
   assert.equal(result.telemetry.requestCount, 0);
   assert.equal(result.evidence.executionCompleteness, "not_applicable");
+});
+
+test("protected transaction dispatch denial propagates without fetch, observation, or acquisition evidence", async () => {
+  await withKey(async () => {
+    const plan = makePlan(1);
+    const authority = plan.candidateAuthorities[0].authorityAddress;
+    const signatureValue = sig(15);
+    const { evidence, selection } = await sourceFor(plan, new Map([[authority, [transfer(signatureValue, 0)]]]));
+    let calls = 0;
+    let authorizations = 0;
+    const events = [];
+    const denial = new SolanaProviderRequestBudgetError("insufficient_allowance");
+    const capability = { mode: "protected", authorizeFetchInvocation() { authorizations += 1; throw denial; } };
+    const requestObservationContext = { allocateRequestSequence: () => 1, observeRequest: (event) => { events.push(event); }, onObservationLimitation() {} };
+    await assert.rejects(executeSolanaTransactionEnrichment(selection, plan, evidence, {
+      fetchImpl: async () => { calls += 1; return rpc(transactionFor(signatureValue)); },
+      requestObservationContext,
+      dispatchCapability: capability,
+    }), (error) => error === denial);
+    assert.equal(authorizations, 1);
+    assert.equal(calls, 0);
+    assert.deepEqual(events, []);
+  });
+});
+
+test("protected transaction authorization runs exactly once for a selected fetch", async () => {
+  await withKey(async () => {
+    const plan = makePlan(1);
+    const authority = plan.candidateAuthorities[0].authorityAddress;
+    const signatureValue = sig(16);
+    const { evidence, selection } = await sourceFor(plan, new Map([[authority, [transfer(signatureValue, 0)]]]));
+    let calls = 0;
+    let authorizations = 0;
+    const result = await executeSolanaTransactionEnrichment(selection, plan, evidence, {
+      fetchImpl: async () => { calls += 1; return rpc(transactionFor(signatureValue)); },
+      dispatchCapability: { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } },
+    });
+    assert.equal(calls, 1);
+    assert.equal(authorizations, 1);
+    assert.equal(result.telemetry.requestCount, 1);
+  });
+});
+
+test("pre-aborted transaction enrichment does not authorize or fetch", async () => {
+  const plan = makePlan(1);
+  const authority = plan.candidateAuthorities[0].authorityAddress;
+  const signatureValue = sig(17);
+  const { evidence, selection } = await sourceFor(plan, new Map([[authority, [transfer(signatureValue, 0)]]]));
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  let authorizations = 0;
+  await assert.rejects(executeSolanaTransactionEnrichment(selection, plan, evidence, {
+    signal: controller.signal,
+    dispatchCapability: { mode: "protected", authorizeFetchInvocation() { authorizations += 1; } },
+    fetchImpl: async () => { calls += 1; return rpc(transactionFor(signatureValue)); },
+  }), /cancel/i);
+  assert.equal(calls, 0);
+  assert.equal(authorizations, 0);
 });
 
 test("duplicate source observations fetch once and retain source links", async () => {
