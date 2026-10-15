@@ -20,7 +20,7 @@ import {
 const HELIUS_MAINNET_RPC_URL = "https://mainnet.helius-rpc.com/";
 const RPC_REQUEST_ID = "token-accounts";
 const PAGE_LIMIT = 5000 as const;
-const MAX_PAGES = 20 as const;
+export const SOLANA_TOKEN_ACCOUNT_MAX_PAGES = 20 as const;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 type JsonObject = Record<string, unknown>;
 type AcquisitionFailureReason = "request_timeout" | "provider_error" | "malformed_response";
@@ -174,7 +174,7 @@ function unavailable(reason: "configuration_error" | AcquisitionFailureReason): 
   return {
     status: "unavailable",
     reason,
-    configuredMaxPages: MAX_PAGES,
+    configuredMaxPages: SOLANA_TOKEN_ACCOUNT_MAX_PAGES,
     requestedPageSize: PAGE_LIMIT,
     pages: [],
   };
@@ -190,7 +190,7 @@ function stopAfterFailure(
         status: "available",
         completeness: "partial",
         stopReason: reason,
-        configuredMaxPages: MAX_PAGES,
+        configuredMaxPages: SOLANA_TOKEN_ACCOUNT_MAX_PAGES,
         requestedPageSize: PAGE_LIMIT,
         pages,
       };
@@ -223,7 +223,7 @@ export async function getSolanaTokenAccountPages(
   const seenTokenAccounts = new Set<string>();
   let cursor: string | null = null;
 
-  for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
+  for (let pageNumber = 1; pageNumber <= SOLANA_TOKEN_ACCOUNT_MAX_PAGES; pageNumber += 1) {
     throwIfSolanaExecutionCancelled(callerSignal === undefined ? undefined : { signal: callerSignal });
     const filters = tokenProgram === "spl-token"
       ? [
@@ -284,18 +284,18 @@ export async function getSolanaTokenAccountPages(
         status: "available",
         completeness: "complete",
         stopReason: "provider_terminated",
-        configuredMaxPages: MAX_PAGES,
+        configuredMaxPages: SOLANA_TOKEN_ACCOUNT_MAX_PAGES,
         requestedPageSize: PAGE_LIMIT,
         pages,
       };
     }
     seenCursors.add(nextCursor);
-    if (pageNumber === MAX_PAGES) {
+    if (pageNumber === SOLANA_TOKEN_ACCOUNT_MAX_PAGES) {
       return {
         status: "available",
         completeness: "partial",
         stopReason: "page_cap",
-        configuredMaxPages: MAX_PAGES,
+        configuredMaxPages: SOLANA_TOKEN_ACCOUNT_MAX_PAGES,
         requestedPageSize: PAGE_LIMIT,
         pages,
       };

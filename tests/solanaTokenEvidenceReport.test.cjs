@@ -10,6 +10,9 @@ const { DexScreenerProviderError } = require("../dist/providers/market/dexScreen
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { decodeSolanaPublicKey, encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
+const { executeSolanaTokenEvidencePublicRequest } = require("../dist/application/solanaTokenEvidencePublicExecution.js");
+const { createSolanaTokenEvidenceAdmissionController } = require("../dist/application/solanaTokenEvidenceAdmissionController.js");
+const { createSolanaProviderRequestBudgetController } = require("../dist/application/solanaProviderRequestBudgetController.js");
 
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
 const signature = (byte) => {
@@ -379,6 +382,114 @@ test("requested history uses fixed bounds and integrates at most five signatures
     assert.equal(transactionCalls, 5);
     assert.equal(requestedPageLimit, 100);
     assert.equal(JSON.stringify(history).includes("offline-report-test-key"), false);
+  });
+});
+
+test("protected public execution authorizes all five built-in fetch categories and consumes only attempted requests", async () => {
+  await withHeliusKey(async () => {
+    const sig = signature(77);
+    const mintData = Buffer.alloc(82);
+    mintData.writeBigUInt64LE(1_000_000n, 36);
+    mintData[44] = 6;
+    mintData[45] = 1;
+    const tokenData = Buffer.alloc(165);
+    tokenData.set(Buffer.from(decodeSolanaPublicKey(MINT)), 0);
+    tokenData.set(Buffer.from(decodeSolanaPublicKey(HOLDER)), 32);
+    tokenData.writeBigUInt64LE(100n, 64);
+    tokenData[108] = 1;
+    const calls = [];
+    const originalFetch = global.fetch;
+    const budget = createSolanaProviderRequestBudgetController({ capacity: 29, initiallyEnabled: true });
+    global.fetch = async (url, init = {}) => {
+      if (String(url).startsWith("https://api.dexscreener.com/")) {
+        calls.push("market");
+        return rpcResponse([]);
+      }
+      const body = JSON.parse(init.body);
+      calls.push(body.method);
+      if (body.method === "getAccountInfo") {
+        return rpcResponse({ jsonrpc: "2.0", id: 1, result: { context: { slot: 10 }, value: {
+          owner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], data: [mintData.toString("base64"), "base64"],
+        } } });
+      }
+      if (body.method === "getProgramAccountsV2") {
+        const page = calls.filter((call) => call === "getProgramAccountsV2").length;
+        return rpcResponse({ jsonrpc: "2.0", id: "token-accounts", result: { context: { slot: 11 + page }, value: {
+          accounts: page === 1 ? [{ pubkey: TOKEN_ACCOUNT, account: { owner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], data: [tokenData.toString("base64"), "base64"], space: 165 } }] : [],
+          paginationKey: page === 1 ? "2" : null,
+        } } });
+      }
+      if (body.method === "getTransfersByAddress") {
+        const page = calls.filter((call) => call === "getTransfersByAddress").length;
+        return rpcResponse({ jsonrpc: "2.0", id: "tqe-transfer-history-probe", result: {
+          data: page === 1 ? [{ signature: sig, slot: 451_369_028, blockTime: 1_790_100_000, type: "transfer",
+            fromUserAccount: key(30), toUserAccount: HOLDER, mint: MINT, amount: "7" }] : [],
+          paginationToken: page === 1 ? "next-page" : null,
+        } });
+      }
+      if (body.method === "getTransaction") {
+        return rpcResponse({ jsonrpc: "2.0", id: "tqe-transaction-probe", result: transactionResult(body.params[0]) });
+      }
+      throw new Error("unexpected mocked provider request");
+    };
+    try {
+      const presentation = await executeSolanaTokenEvidencePublicRequest({
+        chain: "solana", assetAddress: MINT,
+        historicalTransactions: { status: "requested", startTimeUnixSeconds: WINDOW.fromUnixSecondsInclusive,
+          endTimeUnixSecondsExclusive: WINDOW.toUnixSecondsExclusive },
+      }, {
+        admissionPolicy: createSolanaTokenEvidenceAdmissionController({ maxConcurrentExecutions: 1, initiallyEnabled: true }),
+        providerRequestBudgetController: budget,
+      });
+      assert.ok(presentation);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.deepEqual(calls, ["getAccountInfo", "market", "getProgramAccountsV2", "getProgramAccountsV2",
+      "getTransfersByAddress", "getTransfersByAddress", "getTransaction"]);
+    assert.deepEqual(budget.getStatus(), { enabled: true, capacity: 29, available: 22, reservedUnused: 0, consumed: 7 });
+  });
+});
+
+test("insufficient request envelope rejects before any built-in provider fetch", async () => {
+  const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
+  let fetches = 0;
+  const originalFetch = global.fetch;
+  global.fetch = async () => { fetches += 1; return rpcResponse([]); };
+  try {
+    await assert.rejects(executeSolanaTokenEvidencePublicRequest({
+      chain: "solana", assetAddress: MINT,
+      historicalTransactions: { status: "requested", startTimeUnixSeconds: WINDOW.fromUnixSecondsInclusive,
+        endTimeUnixSecondsExclusive: WINDOW.toUnixSecondsExclusive },
+    }, {
+      admissionPolicy: createSolanaTokenEvidenceAdmissionController({ maxConcurrentExecutions: 1, initiallyEnabled: true }),
+      providerRequestBudgetController: createSolanaProviderRequestBudgetController({ capacity: 28, initiallyEnabled: true }),
+    }), (error) => error instanceof SolanaProviderRequestBudgetError && error.reason === "insufficient_allowance");
+  } finally {
+    global.fetch = originalFetch;
+  }
+  assert.equal(fetches, 0);
+});
+
+test("budget dispatch denial propagates through report orchestration without token evidence", async () => {
+  await withHeliusKey(async () => {
+    const { SolanaProviderRequestBudgetError } = require("../dist/types/solanaProviderRequestBudget.js");
+    const denial = new SolanaProviderRequestBudgetError("lease_exhausted");
+    const originalFetch = global.fetch;
+    let fetches = 0;
+    let settlements = 0;
+    global.fetch = async () => { fetches += 1; return rpcResponse(null); };
+    try {
+      await assert.rejects(executeSolanaTokenEvidencePublicRequest({ chain: "solana", assetAddress: MINT }, {
+        admissionPolicy: createSolanaTokenEvidenceAdmissionController({ maxConcurrentExecutions: 1, initiallyEnabled: true }),
+        providerRequestBudgetController: { reserve: () => ({ consume() { throw denial; }, settle() { settlements += 1; } }) },
+        executePresentation: (request, context) => generateSolanaTokenEvidenceReport(request, {}, context),
+      }), (error) => error === denial);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    assert.equal(fetches, 0);
+    assert.equal(settlements, 1);
   });
 });
 

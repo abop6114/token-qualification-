@@ -112,9 +112,12 @@ const DEFAULT_DEPENDENCIES: Pick<SolanaTokenEvidenceReportDependencies, "getAcco
   getTokenAccountPages: (mintAddress, tokenProgram) => getSolanaTokenAccountPages(mintAddress, tokenProgram),
 };
 
+export const SOLANA_HISTORICAL_MAX_SELECTED_AUTHORITIES = 1 as const;
+export const SOLANA_HISTORICAL_MAX_PAGES_PER_AUTHORITY = 2 as const;
+
 const HISTORICAL_LIMITS = {
-  maxSelectedAuthorities: 1,
-  maxPagesPerAuthority: 2,
+  maxSelectedAuthorities: SOLANA_HISTORICAL_MAX_SELECTED_AUTHORITIES,
+  maxPagesPerAuthority: SOLANA_HISTORICAL_MAX_PAGES_PER_AUTHORITY,
   maxRecordsPerAuthority: 150,
   requestTimeoutMs: 30_000,
   transactionEnrichmentTimeoutMs: 30_000,
@@ -385,12 +388,15 @@ async function generateHistoricalEvidence(
 
   const pageStart = collector?.start("historical_page_acquisition", "historical_acquisition");
   const builtInPageAdapter = dependencies.fetchHistoricalPage === undefined;
+  const protectedBuiltInPageAdapter = builtInPageAdapter && context?.dispatchCapability?.mode === "protected";
   const historicalExecution = await executeSolanaHistoricalQueryPlan(queryPlan, {
     requestTimeoutMs: HISTORICAL_LIMITS.requestTimeoutMs,
-    ...(builtInPageAdapter
+    ...(protectedBuiltInPageAdapter
+      ? {}
+      : builtInPageAdapter
       ? {
           fetchPage: (input, timeoutMs, observationContext, signal) => getHeliusHistoricalTransferPage(
-            input, timeoutMs, telemetryOptions.fetchImpl ?? fetch, observationContext, signal,
+            input, timeoutMs, telemetryOptions.fetchImpl ?? fetch, observationContext, signal, context?.dispatchCapability,
           ),
         }
       : {
@@ -401,6 +407,7 @@ async function generateHistoricalEvidence(
     ...(collector === undefined ? {} : { requestObservationContext: collector.context }),
     now: () => now().getTime(),
     ...(context?.signal === undefined ? {} : { signal: context.signal }),
+    ...(context?.dispatchCapability === undefined ? {} : { dispatchCapability: context.dispatchCapability }),
   });
   throwIfSolanaExecutionCancelled(context);
   if (collector && pageStart) {
@@ -451,6 +458,7 @@ async function generateHistoricalEvidence(
       fetchImpl: dependencies.fetchTransaction ?? telemetryOptions.fetchImpl ?? fetch,
       ...(collector === undefined ? {} : { requestObservationContext: collector.context }),
       ...(context?.signal === undefined ? {} : { signal: context.signal }),
+      ...(context?.dispatchCapability === undefined ? {} : { dispatchCapability: context.dispatchCapability }),
     },
   );
   throwIfSolanaExecutionCancelled(context);
@@ -520,7 +528,7 @@ async function generateSolanaTokenEvidenceReportInternal(
   try {
     throwIfSolanaExecutionCancelled(context);
     mintAccount = injected.getAccount === undefined
-      ? await getSolanaAccount(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal)
+      ? await getSolanaAccount(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, HELIUS_ACCOUNT_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal, context?.dispatchCapability)
       : await dependencies.getAccount(request.assetAddress, context?.signal);
     throwIfSolanaExecutionCancelled(context);
     if (collector && mintAcquisitionStart) {
@@ -576,7 +584,7 @@ async function generateSolanaTokenEvidenceReportInternal(
   try {
     throwIfSolanaExecutionCancelled(context);
     marketObservations = injected.getMarkets === undefined
-      ? await getSolanaMintMarkets(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, DEX_SCREENER_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal)
+      ? await getSolanaMintMarkets(request.assetAddress, telemetryOptions.fetchImpl ?? fetch, DEX_SCREENER_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal, context?.dispatchCapability)
       : await dependencies.getMarkets(request.assetAddress, context?.signal);
     throwIfSolanaExecutionCancelled(context);
     marketAcquired = true;
@@ -613,7 +621,7 @@ async function generateSolanaTokenEvidenceReportInternal(
   const holderAcquisitionStart = collector?.start("holder_acquisition", "holders");
   throwIfSolanaExecutionCancelled(context);
   const acquisition = injected.getTokenAccountPages === undefined
-    ? await getSolanaTokenAccountPages(request.assetAddress, resolution.tokenProgram, telemetryOptions.fetchImpl ?? fetch, HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal)
+    ? await getSolanaTokenAccountPages(request.assetAddress, resolution.tokenProgram, telemetryOptions.fetchImpl ?? fetch, HELIUS_TRANSACTION_DEFAULT_TIMEOUT_MS, collector?.context, context?.signal, context?.dispatchCapability)
     : await dependencies.getTokenAccountPages(request.assetAddress, resolution.tokenProgram, context?.signal);
   throwIfSolanaExecutionCancelled(context);
   if (collector && holderAcquisitionStart) {

@@ -7,6 +7,9 @@ import { getSolanaTokenAccountPages } from "./providers/solana/heliusTokenAccoun
 import { getSolanaMintMarkets } from "./providers/market/dexScreener";
 import { isSolanaPublicKeySyntax } from "./validation/solanaAddress";
 
+// This local CLI is a trusted development interface on the legacy-unprotected
+// adapter path. It is not a public execution route; production callers must use
+// executeSolanaTokenEvidencePublicRequest with shared trusted admission and budget controllers.
 async function main(): Promise<void> {
   const mintArguments: string[] = process.argv.slice(2);
   const usage = "Usage: npm start -- <solana-mint-address>";

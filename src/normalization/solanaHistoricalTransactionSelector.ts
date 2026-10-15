@@ -12,7 +12,7 @@ import type { SolanaBoundedHistoricalSamplingEvidence } from "../types/solanaHis
 import { isSolanaPublicKeySyntax, isSolanaTransactionSignatureSyntax } from "../validation/solanaAddress";
 
 const DOMAIN = "solana-historical-transaction-source-fingerprint-v1";
-const SIGNATURE_CAP = 5 as const;
+export const SOLANA_HISTORICAL_TRANSACTION_SIGNATURE_CAP = 5 as const;
 
 function candidateRank(plan: SolanaHistoricalQueryPlanVersioned, candidate: SolanaHistoricalQueryPlanVersioned["candidateAuthorities"][number]): { basis: "sourceRank" | "observedCandidateFrameRank"; value: number } {
   if (plan.planVersion === "solana-bounded-history-query-plan-v1" && "sourceRank" in candidate) {
@@ -235,7 +235,7 @@ export function createSolanaHistoricalTransactionSelection(
   const candidates: SolanaHistoricalTransactionSignatureCandidate[] = signatures.map((signature, index) => ({
     signature,
     sourceObservations: candidateMap.get(signature)!,
-    disposition: index < SIGNATURE_CAP
+    disposition: index < SOLANA_HISTORICAL_TRANSACTION_SIGNATURE_CAP
       ? { status: "selected", selectionPosition: index }
       : { status: "not_selected", reason: "signature_cap" },
   }));
@@ -256,7 +256,7 @@ export function createSolanaHistoricalTransactionSelection(
     sourceFingerprint: fingerprint,
     requestedWindow: { ...plan.requestedWindow },
     sourceEvidenceFetchedAt: evidence.provenance.fetchedAt,
-    signatureCap: SIGNATURE_CAP,
+    signatureCap: SOLANA_HISTORICAL_TRANSACTION_SIGNATURE_CAP,
     selectionCompleteness: "complete",
     sourceCoverage: {
       holderCandidateFrameCompleteness: evidence.authorityScope.candidateSetCompleteness,
@@ -269,7 +269,7 @@ export function createSolanaHistoricalTransactionSelection(
       signatureSourceCompleteness,
     },
     uniqueSignatureCount: candidates.length,
-    selectedUniqueSignatureCount: Math.min(candidates.length, SIGNATURE_CAP),
+    selectedUniqueSignatureCount: Math.min(candidates.length, SOLANA_HISTORICAL_TRANSACTION_SIGNATURE_CAP),
     candidates,
   };
 }

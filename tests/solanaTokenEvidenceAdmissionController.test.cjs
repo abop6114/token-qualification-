@@ -10,6 +10,7 @@ const {
   SolanaTokenEvidenceAdmissionError,
 } = require("../dist/application/solanaTokenEvidencePublicExecution.js");
 const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
+const { createSolanaProviderRequestBudgetController } = require("../dist/application/solanaProviderRequestBudgetController.js");
 
 const ADDRESS = "11111111111111111111111111111111";
 const REQUEST = { chain: "solana", assetAddress: ADDRESS, historicalTransactions: { status: "not_requested" } };
@@ -148,6 +149,7 @@ test("cancellation immediately after permit reservation is released by the publi
   const controller = makeController(1);
   const abort = new AbortController();
   let presentations = 0;
+  let budgetReservations = 0;
   const policy = {
     acquire(request, context) {
       const grant = controller.acquire(request, context);
@@ -157,9 +159,11 @@ test("cancellation immediately after permit reservation is released by the publi
   };
   await assert.rejects(executeSolanaTokenEvidencePublicRequest(REQUEST, {
     admissionPolicy: policy,
+    providerRequestBudgetController: { reserve() { budgetReservations += 1; throw new Error("must not reserve"); } },
     executePresentation: async () => { presentations += 1; return {}; },
   }, { signal: abort.signal }), SolanaExecutionCancelledError);
   assert.equal(presentations, 0);
+  assert.equal(budgetReservations, 0);
   assert.equal(controller.getStatus().activePermitCount, 0);
 });
 
@@ -168,6 +172,7 @@ test("public execution releases capacity after success, execution failure, and c
   const result = { presentation: "unchanged" };
   const success = await executeSolanaTokenEvidencePublicRequest(REQUEST, {
     admissionPolicy: controller,
+    providerRequestBudgetController: createSolanaProviderRequestBudgetController({ capacity: 100, initiallyEnabled: true }),
     executePresentation: async () => result,
   });
   assert.equal(success, result);
@@ -176,6 +181,7 @@ test("public execution releases capacity after success, execution failure, and c
   const failure = new Error("execution failed");
   await assert.rejects(executeSolanaTokenEvidencePublicRequest(REQUEST, {
     admissionPolicy: controller,
+    providerRequestBudgetController: createSolanaProviderRequestBudgetController({ capacity: 100, initiallyEnabled: true }),
     executePresentation: async () => { throw failure; },
   }), (error) => error === failure);
   assert.equal(controller.getStatus().activePermitCount, 0);
@@ -183,6 +189,7 @@ test("public execution releases capacity after success, execution failure, and c
   const abort = new AbortController();
   await assert.rejects(executeSolanaTokenEvidencePublicRequest(REQUEST, {
     admissionPolicy: controller,
+    providerRequestBudgetController: createSolanaProviderRequestBudgetController({ capacity: 100, initiallyEnabled: true }),
     executePresentation: async () => { throw new SolanaExecutionCancelledError(); },
   }, { signal: abort.signal }), SolanaExecutionCancelledError);
   assert.equal(controller.getStatus().activePermitCount, 0);
