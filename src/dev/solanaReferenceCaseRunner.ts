@@ -48,6 +48,11 @@ export interface SolanaReferenceCaseRunnerArguments {
   executionAcknowledged: true;
 }
 
+export interface SolanaReferenceCaseRunnerSignalHandlers {
+  SIGINT: () => void;
+  SIGTERM: () => void;
+}
+
 /** Test seams are available only to local module callers; the command exposes none. */
 export interface SolanaReferenceCaseRunnerOptions {
   environment?: NodeJS.ProcessEnv;
@@ -56,6 +61,7 @@ export interface SolanaReferenceCaseRunnerOptions {
   createBudgetController?: typeof createSolanaProviderRequestBudgetController;
   capture?: typeof captureSolanaReferenceCase;
   storagePreflight?: typeof preflightSolanaReferenceCaseStorage;
+  registerSignalHandlers?: (handlers: SolanaReferenceCaseRunnerSignalHandlers) => () => void;
   writeStdout?: (line: string) => void;
   writeStderr?: (line: string) => void;
 }
@@ -173,6 +179,15 @@ function safeFailureReason(error: unknown): SolanaReferenceCaseRunnerFailure {
   return "capture_failed";
 }
 
+function registerProcessSignalHandlers(handlers: SolanaReferenceCaseRunnerSignalHandlers): () => void {
+  process.on("SIGINT", handlers.SIGINT);
+  process.on("SIGTERM", handlers.SIGTERM);
+  return () => {
+    process.off("SIGINT", handlers.SIGINT);
+    process.off("SIGTERM", handlers.SIGTERM);
+  };
+}
+
 /** Validates all preflight conditions before constructing controllers or invoking capture. */
 export async function runSolanaReferenceCaseRunner(
   argv: readonly string[],
@@ -211,12 +226,27 @@ export async function runSolanaReferenceCaseRunner(
     const admissionPolicy = admissionFactory({ maxConcurrentExecutions: 1, initiallyEnabled: true });
     const providerRequestBudgetController = budgetFactory({ capacity: REQUEST_CAPACITY, initiallyEnabled: true });
     const capture = options.capture ?? captureSolanaReferenceCase;
+    const abortController = new AbortController();
+    const abortOnce = () => {
+      if (!abortController.signal.aborted) abortController.abort();
+    };
+    const signalHandlers: SolanaReferenceCaseRunnerSignalHandlers = {
+      SIGINT: abortOnce,
+      SIGTERM: abortOnce,
+    };
+    const unregisterSignals = (options.registerSignalHandlers ?? registerProcessSignalHandlers)(signalHandlers);
     const captureDependencies: SolanaReferenceCaseCaptureDependencies = {
       admissionPolicy,
       providerRequestBudgetController,
       storageDirectory: canonicalStorageDirectory,
+      signal: abortController.signal,
     };
-    const result = await capture(parsed.mintAddress, captureDependencies);
+    let result: SolanaReferenceCaseCaptureResult;
+    try {
+      result = await capture(parsed.mintAddress, captureDependencies);
+    } finally {
+      unregisterSignals();
+    }
 
     const attemptedRequests = result.referenceCase.capture.operationalTelemetry.counts.attemptedRequestCount;
     if (!Number.isSafeInteger(attemptedRequests) || attemptedRequests < 0 || attemptedRequests > REQUEST_CAPACITY) {

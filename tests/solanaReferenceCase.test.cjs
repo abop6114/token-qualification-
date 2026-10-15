@@ -60,6 +60,7 @@ const { deriveSolanaQualificationMetricEvidence } = require("../dist/analysis/so
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 const { DexScreenerProviderError } = require("../dist/providers/market/dexScreener.js");
+const { SolanaExecutionCancelledError } = require("../dist/types/solanaTrustedExecutionContext.js");
 const {
   parseSolanaReferenceCaseRunnerArguments,
   preflightSolanaReferenceCaseStorage,
@@ -409,6 +410,68 @@ test("valid runner arguments create one shared concurrency-one controller and on
   assert.doesNotMatch(output[0], /evidenceReport|wallet|api-key|offline-only/i);
   assert.deepEqual(stderr, []);
   assert.equal(budget.getStatus().capacity, 22);
+});
+
+for (const signalName of ["SIGINT", "SIGTERM"]) {
+  test(`runner propagates ${signalName} cancellation and does not persist a case`, async (t) => {
+    const directory = await tempDirectory(t);
+    let registeredHandlers;
+    let cleanupCount = 0;
+    let capturedSignal;
+    const stdout = [];
+    const stderr = [];
+    const status = await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+      environment: { HELIUS_API_KEY: "offline-only" },
+      platform: "linux",
+      registerSignalHandlers: (handlers) => {
+        registeredHandlers = handlers;
+        return () => { cleanupCount += 1; };
+      },
+      capture: async (_mint, dependencies) => new Promise((_resolve, reject) => {
+        capturedSignal = dependencies.signal;
+        assert.ok(capturedSignal instanceof AbortSignal);
+        capturedSignal.addEventListener("abort", () => reject(new SolanaExecutionCancelledError()), { once: true });
+        registeredHandlers[signalName]();
+        assert.equal(capturedSignal.aborted, true);
+      }),
+      writeStdout: (line) => stdout.push(line),
+      writeStderr: (line) => stderr.push(line),
+    });
+
+    assert.equal(status, 1);
+    assert.equal(capturedSignal.aborted, true);
+    assert.equal(cleanupCount, 1);
+    assert.deepEqual(stdout, []);
+    assert.deepEqual(stderr, ["Status: failed (cancelled)"]);
+    assert.deepEqual(await readdir(directory), [], "cancellation leaves no accepted case artifact");
+  });
+}
+
+test("runner removes cancellation handlers after capture success or failure", async (t) => {
+  const directory = await tempDirectory(t);
+  let cleanupCount = 0;
+  const registerSignalHandlers = (handlers) => {
+    assert.equal(typeof handlers.SIGINT, "function");
+    assert.equal(typeof handlers.SIGTERM, "function");
+    return () => { cleanupCount += 1; };
+  };
+  const base = {
+    environment: { HELIUS_API_KEY: "offline-only" },
+    platform: "linux",
+    registerSignalHandlers,
+    writeStdout: () => {},
+    writeStderr: () => {},
+  };
+
+  assert.equal(await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+    ...base,
+    capture: async (mint) => runnerResult(mint),
+  }), 0);
+  assert.equal(await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+    ...base,
+    capture: async () => { throw new Error("offline fixture failure"); },
+  }), 1);
+  assert.equal(cleanupCount, 2);
 });
 
 test("runner reports only sanitized failure reasons", async (t) => {
