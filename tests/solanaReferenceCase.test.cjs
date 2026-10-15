@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
-const { mkdtemp, readFile, readdir, rm, stat } = require("node:fs/promises");
+const { mkdtemp, readFile, readdir, rm, stat, symlink } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
@@ -60,6 +60,12 @@ const { deriveSolanaQualificationMetricEvidence } = require("../dist/analysis/so
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 const { DexScreenerProviderError } = require("../dist/providers/market/dexScreener.js");
+const {
+  parseSolanaReferenceCaseRunnerArguments,
+  preflightSolanaReferenceCaseStorage,
+  runSolanaReferenceCaseRunner,
+  SolanaReferenceCaseRunnerError,
+} = require("../dist/dev/solanaReferenceCaseRunner.js");
 
 function unavailableMarketMetric(reason = "not_reported") {
   return { status: "unavailable", value: null, reason };
@@ -261,6 +267,235 @@ test("real report service uses built-in protected adapters with offline transpor
     assert.deepEqual(await deriveMetricsFromSolanaReferenceCaseFile(result.filePath),
       deriveSolanaQualificationMetricEvidence(result.referenceCase.evidenceReport));
     assert.equal((await readdir(directory)).length, 1);
+  } finally {
+    reportService.generateSolanaTokenEvidenceReportWithTelemetry = originalReportService;
+    global.fetch = originalFetch;
+    if (originalHeliusKey === undefined) delete process.env.HELIUS_API_KEY;
+    else process.env.HELIUS_API_KEY = originalHeliusKey;
+  }
+});
+
+function runnerArgs(directory, overrides = {}) {
+  return ["--mint", overrides.mint ?? MINT, "--storage-directory", directory, "--execute-live-capture"];
+}
+
+function runnerResult(mintAddress = MINT, attemptedRequestCount = 2) {
+  return {
+    referenceCase: {
+      identity: { chain: "solana", mintAddress },
+      capture: {
+        operationalTelemetry: {
+          counts: { attemptedRequestCount },
+          stageObservations: [
+            { stage: "market_acquisition", acquisitionDisposition: "complete" },
+            { stage: "holder_acquisition", acquisitionDisposition: "partial" },
+          ],
+        },
+      },
+    },
+    filePath: "C:\\Users\\tester\\AppData\\Local\\TQE\\case.json",
+  };
+}
+
+test("runner parser requires exactly one mint, one absolute directory value, and the execution acknowledgement", async (t) => {
+  const directory = await tempDirectory(t);
+  assert.deepEqual(parseSolanaReferenceCaseRunnerArguments(runnerArgs(directory)), {
+    mintAddress: MINT,
+    storageDirectory: directory,
+    executionAcknowledged: true,
+  });
+  for (const args of [
+    ["--mint", MINT, "--storage-directory", directory],
+    [...runnerArgs(directory), "--history"],
+    [...runnerArgs(directory), "--mint", MINT],
+    [MINT, directory, "--execute-live-capture"],
+    ["--mint", MINT, "--storage-directory", directory, "--execute-live-capture", "--execute-live-capture"],
+    ["--mint", MINT, "--storage-directory", directory, "--history", "--execute-live-capture"],
+  ]) {
+    assert.throws(() => parseSolanaReferenceCaseRunnerArguments(args), SolanaReferenceCaseRunnerError);
+  }
+});
+
+test("runner preflight failures do not construct controllers, invoke capture, or persist a case", async (t) => {
+  const directory = await tempDirectory(t);
+  let controllerCreations = 0;
+  let captureCalls = 0;
+  let providerCalls = 0;
+  const originalFetch = global.fetch;
+  global.fetch = async () => { providerCalls += 1; throw new Error("network must not run"); };
+  const options = {
+    environment: { HELIUS_API_KEY: "offline-only" },
+    createAdmissionController: () => { controllerCreations += 1; throw new Error("unexpected"); },
+    createBudgetController: () => { controllerCreations += 1; throw new Error("unexpected"); },
+    capture: async () => { captureCalls += 1; throw new Error("unexpected"); },
+    writeStdout: () => {},
+    writeStderr: () => {},
+  };
+  try {
+    assert.equal(await runSolanaReferenceCaseRunner(["--mint", MINT, "--storage-directory", directory], options), 1);
+    assert.equal(await runSolanaReferenceCaseRunner(runnerArgs(directory, { mint: "invalid" }), options), 1);
+    assert.equal(await runSolanaReferenceCaseRunner(runnerArgs(directory), { ...options, environment: {} }), 1);
+    assert.equal(await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+      ...options,
+      storagePreflight: async () => { throw new SolanaReferenceCaseRunnerError("storage_preflight_failed"); },
+    }), 1);
+    assert.equal(controllerCreations, 0);
+    assert.equal(captureCalls, 0);
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(await readdir(directory), []);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("runner rejects relative, repository-contained, missing, and non-directory storage paths", async (t) => {
+  const directory = await tempDirectory(t);
+  const filePath = path.join(directory, "not-a-directory");
+  await require("node:fs/promises").writeFile(filePath, "x");
+  for (const unsafe of ["relative-output", process.cwd(), filePath, path.join(directory, "missing")]) {
+    await assert.rejects(preflightSolanaReferenceCaseStorage(unsafe), SolanaReferenceCaseRunnerError);
+  }
+  const linkPath = path.join(directory, "directory-link");
+  try {
+    await symlink(directory, linkPath, "junction");
+    await assert.rejects(preflightSolanaReferenceCaseStorage(linkPath), (error) =>
+      error instanceof SolanaReferenceCaseRunnerError && error.reason === "invalid_storage_path");
+  } catch (error) {
+    if (!(["EPERM", "EACCES", "ENOTSUP"].includes(error.code))) throw error;
+    t.diagnostic("Directory-link check skipped because this Windows environment does not permit creating a junction.");
+  }
+});
+
+test("storage preflight uses an exclusive temporary file and removes it", async (t) => {
+  const directory = await tempDirectory(t);
+  assert.equal(await preflightSolanaReferenceCaseStorage(directory), await require("node:fs/promises").realpath(directory));
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("valid runner arguments create one shared concurrency-one controller and one 22-unit budget", async (t) => {
+  const directory = await tempDirectory(t);
+  let admissionCount = 0;
+  let budgetCount = 0;
+  const output = [];
+  const stderr = [];
+  const budget = createSolanaProviderRequestBudgetController({ capacity: 22, initiallyEnabled: true });
+  const status = await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+    environment: { HELIUS_API_KEY: "offline-only" },
+    platform: "linux",
+    createAdmissionController: (configuration) => {
+      admissionCount += 1;
+      assert.deepEqual(configuration, { maxConcurrentExecutions: 1, initiallyEnabled: true });
+      return createSolanaTokenEvidenceAdmissionController(configuration);
+    },
+    createBudgetController: (configuration) => {
+      budgetCount += 1;
+      assert.deepEqual(configuration, { capacity: 22, initiallyEnabled: true });
+      return budget;
+    },
+    capture: async (mint, dependencies) => {
+      assert.equal(mint, MINT);
+      assert.ok(dependencies.admissionPolicy);
+      assert.equal(dependencies.providerRequestBudgetController, budget);
+      assert.equal(dependencies.storageDirectory, await require("node:fs/promises").realpath(directory));
+      return runnerResult(mint);
+    },
+    writeStdout: (line) => output.push(line),
+    writeStderr: (line) => stderr.push(line),
+  });
+  assert.equal(status, 0);
+  assert.equal(admissionCount, 1);
+  assert.equal(budgetCount, 1);
+  assert.equal(output[0], `Status: success\nMint: ${MINT}\nCase file: C:\\Users\\tester\\AppData\\Local\\TQE\\case.json\nAttempted provider requests: 2\nMarket acquisition: complete\nHolder evidence: partial`);
+  assert.doesNotMatch(output[0], /evidenceReport|wallet|api-key|offline-only/i);
+  assert.deepEqual(stderr, []);
+  assert.equal(budget.getStatus().capacity, 22);
+});
+
+test("runner reports only sanitized failure reasons", async (t) => {
+  const directory = await tempDirectory(t);
+  const stdout = [];
+  const stderr = [];
+  const status = await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+    environment: { HELIUS_API_KEY: "offline-only" },
+    platform: "linux",
+    capture: async () => { throw new Error("api-key=sentinel-secret https://host.invalid/?api-key=sentinel-secret"); },
+    writeStdout: (line) => stdout.push(line),
+    writeStderr: (line) => stderr.push(line),
+  });
+  assert.equal(status, 1);
+  assert.deepEqual(stdout, []);
+  assert.deepEqual(stderr, ["Status: failed (capture_failed)"]);
+  assert.doesNotMatch(stderr.join(""), /sentinel-secret|host\.invalid/);
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("runner warns that Windows ACLs require manual verification", async (t) => {
+  const directory = await tempDirectory(t);
+  const stderr = [];
+  const status = await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+    environment: { HELIUS_API_KEY: "offline-only" },
+    platform: "win32",
+    capture: async (mint) => runnerResult(mint, 0),
+    writeStdout: () => {},
+    writeStderr: (line) => stderr.push(line),
+  });
+  assert.equal(status, 0);
+  assert.deepEqual(stderr, ["Warning: Windows storage ACLs are not verified; manually verify user-only access before live capture."]);
+});
+
+test("runner uses the real capture path with mocked provider transports and no historical requests", async (t) => {
+  const directory = await tempDirectory(t);
+  const originalReportService = reportService.generateSolanaTokenEvidenceReportWithTelemetry;
+  const originalFetch = global.fetch;
+  const originalHeliusKey = process.env.HELIUS_API_KEY;
+  const calls = [];
+  const mintData = Buffer.alloc(82);
+  mintData.writeBigUInt64LE(1_000_000n, 36);
+  mintData[44] = 6;
+  mintData[45] = 1;
+  const response = (payload) => ({ ok: true, status: 200, json: async () => payload });
+  reportService.generateSolanaTokenEvidenceReportWithTelemetry = originalGenerateWithTelemetry;
+  process.env.HELIUS_API_KEY = "offline-runner-test-only";
+  global.fetch = async (url, init = {}) => {
+    if (String(url).startsWith("https://api.dexscreener.com/")) {
+      calls.push("market");
+      return response([]);
+    }
+    const body = JSON.parse(init.body);
+    calls.push(body.method);
+    if (body.method === "getAccountInfo") {
+      return response({ jsonrpc: "2.0", id: 1, result: { context: { slot: 101 }, value: {
+        owner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], data: [mintData.toString("base64"), "base64"],
+      } } });
+    }
+    if (body.method === "getProgramAccountsV2") {
+      return response({ jsonrpc: "2.0", id: "token-accounts", result: { context: { slot: 102 }, value: {
+        accounts: [], paginationKey: null,
+      } } });
+    }
+    throw new Error("unexpected offline request");
+  };
+  const output = [];
+  const stderr = [];
+  try {
+    const exitCode = await runSolanaReferenceCaseRunner(runnerArgs(directory), {
+      platform: "linux",
+      writeStdout: (line) => output.push(line),
+      writeStderr: (line) => stderr.push(line),
+    });
+    assert.equal(exitCode, 0);
+    assert.deepEqual(calls, ["getAccountInfo", "market", "getProgramAccountsV2"]);
+    assert.match(output[0], /Attempted provider requests: 3/);
+    assert.match(output[0], /Market acquisition: complete/);
+    assert.match(output[0], /Holder evidence: complete/);
+    assert.deepEqual(stderr, []);
+    assert.equal((await readdir(directory)).filter((entry) => entry.endsWith(".json")).length, 1);
+    assert.equal((await readdir(directory)).some((entry) => entry.includes("write-probe")), false);
+    const caseFile = path.join(directory, (await readdir(directory)).find((entry) => entry.endsWith(".json")));
+    const saved = await loadSolanaReferenceCaseArtifact(caseFile);
+    assert.deepEqual(saved.referenceCase.capture.request.historicalTransactions, { status: "not_requested" });
+    assert.deepEqual(saved.referenceCase.evidenceReport.historicalTransactions, { status: "not_requested" });
+    assert.equal(saved.referenceCase.capture.operationalTelemetry.counts.attemptedRequestCount, 3);
   } finally {
     reportService.generateSolanaTokenEvidenceReportWithTelemetry = originalReportService;
     global.fetch = originalFetch;
