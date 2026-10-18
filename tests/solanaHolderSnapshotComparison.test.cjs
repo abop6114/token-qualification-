@@ -275,6 +275,34 @@ test("zero supply is valid evidence but concentration changes remain unavailable
   });
 });
 
+test("empty positive-balance populations validate as unavailable and preserve their reason in comparison", () => {
+  const empty = record([], { supply: "1000" });
+  const zeroRows = record([[1, "0"], [2, "0"]], { supply: "1000" });
+  for (const snapshotRecord of [empty, zeroRows]) {
+    for (const topN of [1, 5, 10, 20]) {
+      const concentration = snapshotRecord.snapshot.concentration[`top${topN}`];
+      assert.equal(concentration.status, "unavailable");
+      assert.equal(concentration.reason, "empty_observed_population");
+    }
+  }
+  validateSolanaHolderSnapshotRecordV2(createSolanaHolderSnapshotRecordV2(
+    structure([], { supply: "1000" }),
+    { completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000 },
+  ));
+
+  const after = record([[1, "250"]], { supply: "1000", fetchedAt: "2026-01-02T00:00:00Z" });
+  const delta = compare(empty, after).concentrationPercentagePointDeltas.top1;
+  assert.deepEqual(delta, {
+    status: "unavailable", percentagePointDelta: null, reason: "earlier_unavailable",
+    earlierReason: "empty_observed_population", laterReason: null,
+  });
+  const bothUnavailable = compare(empty, record([], { supply: "1000", fetchedAt: "2026-01-02T00:00:00Z" })).concentrationPercentagePointDeltas.top1;
+  assert.deepEqual(bothUnavailable, {
+    status: "unavailable", percentagePointDelta: null, reason: "both_unavailable",
+    earlierReason: "empty_observed_population", laterReason: "empty_observed_population",
+  });
+});
+
 test("huge balances and signed deltas remain exact beyond Number.MAX_SAFE_INTEGER", () => {
   const max = "18446744073709551615";
   const before = record([[1, "18446744073709551614"]], { supply: max });

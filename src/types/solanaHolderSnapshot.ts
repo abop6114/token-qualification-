@@ -117,8 +117,8 @@ export type SolanaConcentrationDelta =
       status: "unavailable";
       percentagePointDelta: null;
       reason: "earlier_unavailable" | "later_unavailable" | "both_unavailable";
-      earlierReason: "zero_supply" | "unsupported_balance_affecting_extension" | "supply_inconsistency" | "enumeration_incomplete" | null;
-      laterReason: "zero_supply" | "unsupported_balance_affecting_extension" | "supply_inconsistency" | "enumeration_incomplete" | null;
+      earlierReason: "zero_supply" | "unsupported_balance_affecting_extension" | "supply_inconsistency" | "enumeration_incomplete" | "empty_observed_population" | null;
+      laterReason: "zero_supply" | "unsupported_balance_affecting_extension" | "supply_inconsistency" | "enumeration_incomplete" | "empty_observed_population" | null;
     };
 
 export interface SolanaHolderSnapshotComparison {

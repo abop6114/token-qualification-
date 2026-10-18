@@ -3,6 +3,7 @@ const { test } = require("node:test");
 const { evaluateSolanaClaimPermissions, SolanaClaimPermissionInputError } = require("../dist/analysis/solanaClaimPermission.js");
 const { SolanaQualificationMetricEvidenceInputError } = require("../dist/analysis/solanaQualificationMetricEvidence.js");
 const { generateSolanaTokenEvidenceReport } = require("../dist/application/solanaTokenEvidenceReport.js");
+const { presentSolanaTokenEvidenceReport } = require("../dist/application/solanaTokenEvidencePresentation.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 const { encodeSolanaPublicKey, decodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 
@@ -31,13 +32,20 @@ function mintAccount({ supply = 18446744073709551615n, mintAuthority = null, fre
   return { requestedAddress: MINT, owner: SOLANA_TOKEN_PROGRAM_IDS[tokenProgram], dataBase64: data.toString("base64") };
 }
 
-function tokenAccount(address = TOKEN_ACCOUNT, balance = 100n) {
-  const data = Buffer.alloc(165);
+function tokenAccount(address = TOKEN_ACCOUNT, balance = 100n, options = {}) {
+  const data = Buffer.alloc(options.extension ? 174 : 165);
   data.set(Buffer.from(decodeSolanaPublicKey(MINT)), 0);
-  data.set(Buffer.from(decodeSolanaPublicKey(OWNER)), 32);
+  data.set(Buffer.from(decodeSolanaPublicKey(options.ownerAddress ?? OWNER)), 32);
   data.writeBigUInt64LE(balance, 64);
   data[108] = 1;
-  return { address, programOwner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], dataBase64: data.toString("base64"), reportedSpace: 165 };
+  if (options.extension) {
+    data[165] = 2;
+    data.writeUInt16LE(options.extension.type, 166);
+    data.writeUInt16LE(4, 168);
+    data.writeUInt32LE(1, 170);
+  }
+  const tokenProgram = options.tokenProgram ?? "spl-token";
+  return { address, programOwner: SOLANA_TOKEN_PROGRAM_IDS[tokenProgram], dataBase64: data.toString("base64"), reportedSpace: data.length };
 }
 
 function pool(overrides = {}) {
@@ -216,6 +224,174 @@ test("partial enumeration and varying context slots remain observed-frame only a
   for (const id of ["holders.concentration_top1", "holders.concentration_top5", "holders.concentration_top10", "holders.concentration_top20"]) {
     assert.equal(claim(output, id).outcome, "withheld_insufficient");
     assert.equal(claim(output, id).reason, "enumeration_incomplete");
+  }
+});
+
+test("complete natural enumeration projects all Top-N concentrations and D10 permissions without an atomic-snapshot claim", async () => {
+  const pages = [
+    {
+      accounts: [
+        tokenAccount(key(101), 40n, { ownerAddress: key(1) }),
+        tokenAccount(key(102), 30n, { ownerAddress: key(2) }),
+      ],
+      paginationKey: "2",
+      contextSlot: 123,
+    },
+    {
+      accounts: [
+        tokenAccount(key(103), 20n, { ownerAddress: key(3) }),
+        tokenAccount(key(104), 10n, { ownerAddress: key(4) }),
+      ],
+      paginationKey: null,
+      contextSlot: 124,
+    },
+  ];
+  const report = await makeReport({ mint: { supply: 100n }, pages });
+  const structure = report.holders.evidence.holderStructure;
+  assert.equal(structure.enumeration.completeness, "complete");
+  assert.equal(structure.enumeration.slotConsistency, "not_guaranteed");
+  assert.deepEqual(structure.enumeration.contextSlots, [123, 124]);
+  assert.equal(structure.amountCoverage.state, "complete");
+  assert.equal(structure.observedPositiveBalanceRaw, "100");
+  assert.equal(structure.supplyDifferenceRaw, "0");
+
+  const output = evaluateSolanaClaimPermissions(report);
+  for (const [n, expectedPercentage, expectedNumerator] of [
+    [1, "40.000000", "40"],
+    [5, "100.000000", "100"],
+    [10, "100.000000", "100"],
+    [20, "100.000000", "100"],
+  ]) {
+    const item = claim(output, `holders.concentration_top${n}`);
+    assert.equal(item.outcome, "permitted");
+    assert.equal(item.value.percentage, expectedPercentage);
+    assert.equal(item.value.numeratorRaw, expectedNumerator);
+    assert.equal(item.value.denominatorRaw, "100");
+    assert.equal(item.evidence[0].status, "available");
+    assert.equal(item.evidence[0].value, expectedPercentage);
+    assert.ok(item.limitationCodes.includes("not_atomic_with_mint_supply"));
+    assert.ok(item.limitationCodes.includes("not_economic_control_concentration"));
+  }
+});
+
+test("complete enumeration with partial Token-2022 amount coverage withholds concentration claims", async () => {
+  const report = await makeReport({
+    mint: { supply: 100n, tokenProgram: "token-2022" },
+    pages: [{
+      accounts: [tokenAccount(key(105), 40n, { tokenProgram: "token-2022", extension: { type: 2 } })],
+      paginationKey: null,
+      contextSlot: 123,
+    }],
+  });
+  const structure = report.holders.evidence.holderStructure;
+  assert.equal(structure.enumeration.completeness, "complete");
+  assert.equal(structure.amountCoverage.state, "partial");
+  assert.equal(structure.concentration.top1.status, "unavailable");
+  assert.equal(structure.concentration.top1.reason, "unsupported_balance_affecting_extension");
+
+  const output = evaluateSolanaClaimPermissions(report);
+  for (const n of [1, 5, 10, 20]) {
+    const item = claim(output, `holders.concentration_top${n}`);
+    assert.equal(item.outcome, "withheld_insufficient");
+    assert.equal(item.value, null);
+    assert.equal(item.evidence[0].value, null);
+    assert.equal(item.evidence[0].numeratorRaw, null);
+    assert.equal(item.evidence[0].denominatorRaw, null);
+  }
+});
+
+test("complete enumeration with observed positive balances above supply withholds concentration claims", async () => {
+  const report = await makeReport({
+    mint: { supply: 100n },
+    pages: [{ accounts: [tokenAccount(key(106), 101n)], paginationKey: null, contextSlot: 123 }],
+  });
+  const structure = report.holders.evidence.holderStructure;
+  assert.equal(structure.enumeration.completeness, "complete");
+  assert.equal(structure.amountCoverage.state, "partial");
+  assert.equal(structure.amountCoverage.reason, "supply_inconsistency");
+  assert.equal(structure.concentration.top1.status, "unavailable");
+
+  const output = evaluateSolanaClaimPermissions(report);
+  for (const n of [1, 5, 10, 20]) {
+    const item = claim(output, `holders.concentration_top${n}`);
+    assert.equal(item.outcome, "withheld_insufficient");
+    assert.equal(item.value, null);
+    assert.equal(item.evidence[0].reason, "supply_inconsistency");
+    assert.equal(item.evidence[0].value, null);
+  }
+});
+
+test("empty naturally completed enumeration with positive supply withholds and redacts concentration claims", async () => {
+  const report = await makeReport({
+    mint: { supply: 100n },
+    pages: [
+      { accounts: [], paginationKey: "2", contextSlot: 123 },
+      { accounts: [], paginationKey: null, contextSlot: 124 },
+    ],
+  });
+  const structure = report.holders.evidence.holderStructure;
+  assert.equal(structure.enumeration.completeness, "complete");
+  assert.equal(structure.enumeration.slotConsistency, "not_guaranteed");
+  assert.deepEqual(structure.enumeration.contextSlots, [123, 124]);
+  assert.equal(structure.tokenAccountCount, 0);
+  assert.equal(structure.nonzeroTokenAccountCount, 0);
+  assert.equal(structure.observedPositiveBalanceRaw, "0");
+  assert.equal(structure.supplyDifferenceRaw, "100");
+  assert.equal(structure.amountCoverage.state, "complete");
+  for (const topN of [1, 5, 10, 20]) {
+    assert.equal(structure.concentration[`top${topN}`].status, "unavailable");
+    assert.equal(structure.concentration[`top${topN}`].reason, "empty_observed_population");
+  }
+
+  const output = evaluateSolanaClaimPermissions(report);
+  for (const topN of [1, 5, 10, 20]) {
+    const item = claim(output, `holders.concentration_top${topN}`);
+    assert.equal(item.outcome, "withheld_insufficient");
+    assert.equal(item.reason, "metric_not_eligible");
+    assert.equal(item.value, null);
+    assert.equal(item.evidence[0].status, "unavailable");
+    assert.equal(item.evidence[0].reason, "empty_observed_population");
+    assert.equal(item.evidence[0].value, null);
+    assert.equal(item.evidence[0].numeratorRaw, null);
+    assert.equal(item.evidence[0].denominatorRaw, null);
+    assert.equal(JSON.stringify(item).includes('"percentage":"0.000000"'), false);
+    assert.ok(item.limitationCodes.includes("slot_consistency_not_guaranteed"));
+    assert.ok(item.limitationCodes.includes("not_atomic_with_mint_supply"));
+  }
+
+  const presentation = presentSolanaTokenEvidenceReport(report).sections[2];
+  assert.equal(presentation.concentration.every((item) => item.status === "unavailable" && item.reason === "empty_observed_population"), true);
+
+  const zeroRowsReport = await makeReport({
+    mint: { supply: 100n },
+    pages: [{
+      accounts: [
+        tokenAccount(key(107), 0n, { ownerAddress: key(1) }),
+        tokenAccount(key(108), 0n, { ownerAddress: key(2) }),
+      ],
+      paginationKey: null,
+      contextSlot: 125,
+    }],
+  });
+  assert.equal(zeroRowsReport.holders.evidence.holderStructure.tokenAccountCount, 2);
+  assert.equal(zeroRowsReport.holders.evidence.holderStructure.nonzeroTokenAccountCount, 0);
+  for (const topN of [1, 5, 10, 20]) {
+    const item = claim(evaluateSolanaClaimPermissions(zeroRowsReport), `holders.concentration_top${topN}`);
+    assert.equal(item.outcome, "withheld_insufficient");
+    assert.equal(item.evidence[0].reason, "empty_observed_population");
+    assert.equal(item.evidence[0].value, null);
+    assert.equal(item.evidence[0].numeratorRaw, null);
+    assert.equal(item.evidence[0].denominatorRaw, null);
+  }
+
+  const zeroSupplyReport = await makeReport({
+    mint: { supply: 0n },
+    pages: [{ accounts: [], paginationKey: null, contextSlot: 126 }],
+  });
+  for (const topN of [1, 5, 10, 20]) {
+    const item = claim(evaluateSolanaClaimPermissions(zeroSupplyReport), `holders.concentration_top${topN}`);
+    assert.equal(item.outcome, "withheld_insufficient");
+    assert.equal(item.evidence[0].reason, "zero_supply");
   }
 });
 

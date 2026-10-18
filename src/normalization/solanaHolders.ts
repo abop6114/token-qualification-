@@ -206,7 +206,8 @@ export function normalizeSolanaHolderStructure(
   const isPartialEnumeration = acquisition?.status === "available" && acquisition.completeness === "partial";
   const concentrationFor = (topN: typeof TOP_N_VALUES[number]): HolderConcentration | PartialHolderConcentration => {
     const numerator = owners.slice(0, topN).reduce((sum, owner) => sum + owner.balance, 0n);
-    if (isPartialEnumeration || supplyInconsistent || partial || supply === 0n) {
+    const emptyPositivePopulation = owners.length === 0 && supply > 0n;
+    if (isPartialEnumeration || supplyInconsistent || partial || supply === 0n || emptyPositivePopulation) {
       return {
         status: "unavailable", topN, numeratorRaw: null, denominatorRaw: input.currentMintSupplyRaw,
         denominatorBasis: "current_mint_supply", percentage: null,
@@ -216,7 +217,9 @@ export function normalizeSolanaHolderStructure(
           ? "supply_inconsistency"
           : partial
             ? "unsupported_balance_affecting_extension"
-            : "zero_supply",
+            : supply === 0n
+              ? "zero_supply"
+              : "empty_observed_population",
       };
     }
     // Percentage uses half-up rounding to six decimal places; raw balances remain exact.

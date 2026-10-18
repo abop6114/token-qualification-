@@ -231,6 +231,23 @@ test("zero supply alone permits proven non-positive absence while concentration 
   assert.equal(result.concentrationTrajectory[0].top1.reason, "zero_supply");
 });
 
+test("positive supply with no positive observed balances keeps concentration trajectory unavailable", () => {
+  const result = evidence(snapshot([], 0, { supply: "1000", contextSlots: [100, 101] }), snapshot([[1, "20"]], 1));
+  assert.deepEqual(result.captures[0].contextSlots, [100, 101]);
+  assert.deepEqual(result.concentrationTrajectory[0].top1, {
+    status: "unavailable", percentage: null, reason: "empty_observed_population",
+  });
+  assert.equal(result.concentrationTrajectory[0].top1.percentage, null);
+
+  const v2 = buildSolanaHolderSnapshotSeriesEvidenceV2(seriesV2(
+    snapshotV2([], 0, { supply: "1000" }),
+    snapshotV2([[1, "20"]], 1),
+  ));
+  assert.deepEqual(v2.concentrationTrajectory[0].top1, {
+    status: "unavailable", percentage: null, reason: "empty_observed_population",
+  });
+});
+
 test("owner-count trajectory preserves values and marks partial amount coverage", () => {
   const result = evidence(snapshot([[1, "20"]], 0), snapshot([[1, "25"]], 1, { mintExtensionTypes: [1] }));
   assert.deepEqual(result.observedPositiveOwnerCountTrajectory, [

@@ -367,7 +367,9 @@ function validateSnapshot(snapshot: SolanaHolderSnapshotPayload, allowPartialEnu
         ? "supply_inconsistency"
         : zeroSupply
           ? "zero_supply"
-          : coverage.state === "partial" ? "unsupported_balance_affecting_extension" : null;
+          : coverage.state === "partial"
+            ? "unsupported_balance_affecting_extension"
+            : expectedOwners.length === 0 ? "empty_observed_population" : null;
       assert(metric.numeratorRaw === null && metric.percentage === null && expectedReason !== null && metric.reason === expectedReason, `top${n} availability contradicts coverage`);
     }
   }

@@ -77,7 +77,7 @@ export type HolderConcentration =
       denominatorRaw: string;
       denominatorBasis: "current_mint_supply";
       percentage: null;
-      reason: "zero_supply" | "unsupported_balance_affecting_extension" | "supply_inconsistency";
+      reason: "zero_supply" | "unsupported_balance_affecting_extension" | "supply_inconsistency" | "empty_observed_population";
     };
 
 export interface SolanaHolderStructure {

@@ -158,12 +158,43 @@ test("orders equal-balance owner authorities by lexicographically smaller addres
   assert.deepEqual(result.rawOwnerAuthorities.map((owner) => owner.ownerAddress), expected);
 });
 
-test("returns an empty complete snapshot when enumeration contains no accounts", () => {
-  const result = normalize([]);
+test("complete empty positive-balance populations make concentration unavailable without changing observed counts", () => {
+  for (const accounts of [[], [account(1, "0"), account(2, "0")]]) {
+    const result = normalize(accounts, { currentMintSupplyRaw: "1000" });
+    assert.equal(result.enumeration.completeness, "complete");
+    assert.equal(result.tokenAccountCount, accounts.length);
+    assert.equal(result.nonzeroTokenAccountCount, 0);
+    assert.equal(result.rawOwnerCount, 0);
+    assert.equal(result.observedPositiveBalanceRaw, "0");
+    assert.equal(result.supplyDifferenceRaw, "1000");
+    assert.equal(result.amountCoverage.state, "complete");
+    for (const topN of [1, 5, 10, 20]) {
+      const metric = result.concentration[`top${topN}`];
+      assert.equal(metric.status, "unavailable");
+      assert.equal(metric.reason, "empty_observed_population");
+      assert.equal(metric.numeratorRaw, null);
+      assert.equal(metric.percentage, null);
+    }
+  }
+});
+
+test("complete positive balances still calculate the existing concentration values", () => {
+  const result = normalize([account(1, "40"), account(2, "30"), account(3, "20"), account(4, "10")], {
+    currentMintSupplyRaw: "100",
+  });
+  assert.deepEqual([1, 5, 10, 20].map((topN) => result.concentration[`top${topN}`].percentage), [
+    "40.000000", "100.000000", "100.000000", "100.000000",
+  ]);
+});
+
+test("zero supply remains unavailable with its existing zero_supply reason", () => {
+  const result = normalize([], { currentMintSupplyRaw: "0" });
   assert.equal(result.tokenAccountCount, 0);
   assert.equal(result.rawOwnerCount, 0);
-  assert.equal(result.concentration.top1.numeratorRaw, "0");
-  assert.equal(result.concentration.top1.percentage, "0.000000");
+  for (const topN of [1, 5, 10, 20]) {
+    assert.equal(result.concentration[`top${topN}`].status, "unavailable");
+    assert.equal(result.concentration[`top${topN}`].reason, "zero_supply");
+  }
 });
 
 test("zero-balance-only owner authority does not increase rawOwnerCount", () => {
