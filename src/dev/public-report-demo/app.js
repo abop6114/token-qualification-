@@ -5,9 +5,11 @@
   const addressInput = document.getElementById("asset-address");
   const addressStatus = document.getElementById("address-status");
   const loadButton = document.getElementById("load-demo");
+  const submitButton = form.querySelector("button[type='submit']");
   const reportStatus = document.getElementById("report-status");
   const reportRoot = document.getElementById("report-root");
   const demoBanner = document.getElementById("demo-banner");
+  let requestActive = false;
 
   const limitationCopy = {
     selected_pool_only: "These market figures describe one selected pool, not all markets for the token.",
@@ -191,7 +193,7 @@
       && Array.isArray(report.technicalDetails) && Array.isArray(report.evidenceGaps);
   }
 
-  function renderReport(report) {
+  function renderReport(report, mode) {
     if (!validateReport(report)) throw new Error("invalid_public_report");
     const allFields = fieldMap(report);
     const summary = summaryMap(report);
@@ -203,7 +205,7 @@
 
     const heading = node("div", "token-heading");
     const headingText = node("div");
-    headingText.append(node("p", "section-kicker", "Synthetic report subject"));
+    headingText.append(node("p", "section-kicker", mode === "live" ? "Live evidence subject" : "Synthetic report subject"));
     headingText.append(node("h2", "", report.token.name || "Unnamed token"));
     heading.append(headingText);
     heading.append(node("div", "token-address", report.token.assetId));
@@ -212,7 +214,7 @@
     const overview = appendSection(reportRoot, "At a glance", "A short summary of the available token evidence.");
     const grid = node("div", "summary-grid");
     for (const id of ["market.liquidity", "market.volume", "holders.observed_address_count"]) {
-      const field = summary.get(id);
+      const field = allFields.get(id);
       if (field) grid.append(renderMetric(field, { card: true }));
     }
     overview.append(grid);
@@ -220,7 +222,7 @@
     const marketBlock = appendSection(reportRoot, "Market information", "Reported figures describe the selected pool and observation, not the token’s entire market.");
     const marketGrid = node("div", "data-list");
     for (const id of ["market.price", "market.liquidity", "market.volume"]) {
-      const field = summary.get(id);
+      const field = allFields.get(id);
       if (field) marketGrid.append(renderMetric(field));
     }
     if (market) {
@@ -268,14 +270,50 @@
       reportRoot.append(timestamp);
     }
     demoBanner.hidden = false;
+    demoBanner.querySelector("strong").textContent = mode === "live" ? "Live evidence" : "Synthetic demonstration";
+    demoBanner.querySelector("span").textContent = mode === "live"
+      ? "This report uses a bounded provider evidence request; observations may be partial and are not a qualification verdict."
+      : "This is test data, not a real token analysis.";
   }
 
-  form.addEventListener("submit", (event) => {
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (requestActive) return;
     const submitted = addressInput.value.trim();
-    addressStatus.textContent = submitted
-      ? "Live analysis is not available. This address was not analyzed. Load the synthetic demonstration to view example data."
-      : "Enter an address, or load the synthetic demonstration below.";
+    reportRoot.replaceChildren();
+    demoBanner.hidden = true;
+    reportStatus.textContent = "";
+    if (!submitted) {
+      addressStatus.textContent = "Enter a Solana token address, or load the synthetic demonstration below.";
+      return;
+    }
+    submitButton.disabled = true;
+    loadButton.disabled = true;
+    addressInput.disabled = true;
+    requestActive = true;
+    addressStatus.textContent = "Retrieving bounded evidence and preparing a report…";
+    try {
+      const response = await fetch("/api/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ chain: "solana", assetAddress: submitted }),
+        cache: "no-store",
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error?.message || "A report could not be prepared.");
+      renderReport(payload, "live");
+      addressStatus.textContent = "Live evidence report prepared. Review the listed limits and evidence gaps.";
+    } catch (error) {
+      reportRoot.replaceChildren();
+      demoBanner.hidden = true;
+      addressStatus.textContent = "The live report could not be prepared.";
+      reportStatus.textContent = error instanceof Error && error.message ? error.message : "Try again later.";
+    } finally {
+      submitButton.disabled = false;
+      loadButton.disabled = false;
+      addressInput.disabled = false;
+      requestActive = false;
+    }
   });
 
   loadButton.addEventListener("click", async () => {
@@ -283,7 +321,7 @@
     try {
       const response = await fetch("/public-report.json", { headers: { Accept: "application/json" }, cache: "no-store" });
       if (!response.ok) throw new Error("local_sample_unavailable");
-      renderReport(await response.json());
+      renderReport(await response.json(), "synthetic");
       addressStatus.textContent = "The report shown is the fixed synthetic example. It does not describe an address entered above.";
     } catch {
       reportRoot.replaceChildren();

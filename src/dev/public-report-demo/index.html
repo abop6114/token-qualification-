@@ -27,15 +27,15 @@
       <section class="lookup panel" aria-labelledby="lookup-title">
         <div>
           <h2 id="lookup-title">Enter a Solana token address</h2>
-          <p>Live analysis is not available in this prototype. An address entered here is not sent anywhere.</p>
+          <p>Submit a Solana token address to this local prototype. The address is sent to the loopback server, which uses the bounded protected evidence path.</p>
         </div>
         <form id="address-form" novalidate>
           <label for="asset-address">Token address</label>
           <div class="lookup-row">
             <input id="asset-address" name="asset-address" autocomplete="off" spellcheck="false" placeholder="Paste a Solana token address" aria-describedby="address-help address-status">
-            <button class="button button-secondary" type="submit">Check availability</button>
+            <button class="button button-secondary" type="submit">Generate evidence report</button>
           </div>
-          <p id="address-help" class="muted">This prototype does not analyze submitted addresses.</p>
+          <p id="address-help" class="muted">One analysis at a time. Historical transactions are not requested. Provider evidence may be partial or unavailable.</p>
           <p id="address-status" class="status-message" role="status" aria-live="polite"></p>
         </form>
         <div class="demo-choice">

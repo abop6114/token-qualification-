@@ -280,8 +280,8 @@ test("Token-2022 controls are presence-only and never expose extension IDs or pa
 
 test("fabricated and copied context handles fail closed", async () => {
   const { handle } = await resolvedContext();
-  assert.deepEqual(composeSolanaPublicReport({ ...handle }), { valid: false, error: { code: "invalid_context", message: "A validated saved-case context is required." } });
-  assert.deepEqual(composeSolanaPublicReport(Object.create(Object.getPrototypeOf(handle))), { valid: false, error: { code: "invalid_context", message: "A validated saved-case context is required." } });
+  assert.deepEqual(composeSolanaPublicReport({ ...handle }), { valid: false, error: { code: "invalid_context", message: "A validated evidence context is required." } });
+  assert.deepEqual(composeSolanaPublicReport(Object.create(Object.getPrototypeOf(handle))), { valid: false, error: { code: "invalid_context", message: "A validated evidence context is required." } });
 });
 
 test("leakage sentinels, holder/account and operational fields never enter the public serialization", async () => {

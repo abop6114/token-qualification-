@@ -31,7 +31,7 @@ export type SolanaPublicReportComposerResult =
   | { readonly valid: false; readonly error: { readonly code: "invalid_context" | "restriction_invalid"; readonly message: string } };
 
 const ERROR_MESSAGES = {
-  invalid_context: "A validated saved-case context is required.",
+  invalid_context: "A validated evidence context is required.",
   restriction_invalid: "The validated analyst restrictions are inconsistent with the evidence.",
 } as const;
 
@@ -98,16 +98,24 @@ function indexUnique<T extends { id: string }>(values: readonly T[]): Map<string
 function validateContext(value: unknown): value is SolanaValidatedPublicReportContext {
   if (!isRecord(value) || value.schemaVersion !== "solana-internal-public-report-context-v1"
     || !isRecord(value.identity) || value.identity.chain !== "solana" || typeof value.identity.assetId !== "string"
-    || !CASE_ID.test(String(value.identity.caseId)) || !HASH.test(String(value.identity.caseContentSha256))
     || safeTimestamp(value.identity.generatedAt) === null || !isRecord(value.metrics) || !isRecord(value.claims)
     || value.metrics.schemaVersion !== "solana-qualification-metric-evidence-v1" || value.metrics.chain !== "solana"
     || value.metrics.mintAddress !== value.identity.assetId || !Array.isArray(value.metrics.entries)
     || value.claims.schemaVersion !== "tqe-claim-permission-proposal-v1" || value.claims.chain !== "solana"
     || value.claims.mintAddress !== value.identity.assetId || !Array.isArray(value.claims.claims)
     || !isRecord(value.review) || value.review.resolutionSucceeded !== true
-    || !(value.review.disposition === "case_bound_no_restrictions_confirmed" || value.review.disposition === "case_bound_restrictions_applied")
     || !Array.isArray(value.review.restrictions) || !isRecord(value.provenance) || !isRecord(value.provenance.sections)
     || !isRecord(value.provenance.holderCoverage)) return false;
+  if (value.provenance.evidenceSource === "live_observation") {
+    if (value.identity.caseId !== null || value.identity.caseContentSha256 !== null
+      || value.review.disposition !== "not_applicable" || value.review.recordId !== null
+      || value.review.analystNoteSha256 !== null || value.review.livePolicyVersion !== "solana-live-review-policy-v1"
+      || value.review.restrictions.length !== 0) return false;
+  } else if (value.provenance.evidenceSource === "saved_reference_case") {
+    if (!CASE_ID.test(String(value.identity.caseId)) || !HASH.test(String(value.identity.caseContentSha256))
+      || !(value.review.disposition === "case_bound_no_restrictions_confirmed" || value.review.disposition === "case_bound_restrictions_applied")
+      || typeof value.review.recordId !== "string" || typeof value.review.analystNoteSha256 !== "string") return false;
+  } else return false;
   return indexUnique(value.metrics.entries as { id: string }[]) !== null && indexUnique(value.claims.claims as { id: string }[]) !== null;
 }
 
@@ -124,6 +132,10 @@ function validateRestrictions(context: SolanaValidatedPublicReportContext): Map<
     const key = `${item.metricId}\0${item.claimId}`;
     if (map.has(key)) return null;
     map.set(key, item as unknown as PublicRestrictionOverlayEntry);
+  }
+  if (context.provenance.evidenceSource === "live_observation") {
+    if (context.review.disposition !== "not_applicable" || map.size !== 0) return null;
+    return map;
   }
   if ((context.review.disposition === "case_bound_no_restrictions_confirmed" && map.size !== 0)
     || (context.review.disposition === "case_bound_restrictions_applied" && map.size === 0)) return null;
@@ -246,7 +258,8 @@ function makeField(
   const base = {
     id: definition.id,
     label: definition.label,
-    explanation: fieldExplanation(definition, metric, claim, emptyPopulation),
+    ...(context.provenance.evidenceSource === "live_observation" && definition.id === "identity.chain"
+      ? {} : { explanation: fieldExplanation(definition, metric, claim, emptyPopulation) }),
     evidenceState: state,
     unit: definition.unit,
     explanationCode: explanationCode(metric, restriction, emptyPopulation),
@@ -339,7 +352,9 @@ export function composeSolanaPublicReport(handle: unknown): SolanaPublicReportCo
       schemaVersion: PUBLIC_REPORT_SCHEMA_VERSION,
       token: { chain: "solana", assetId: context.identity.assetId, name: null, symbol: null },
       generatedAt: context.identity.generatedAt,
-      freshness: { state: "historical_observation", observedAt: latestObservation(context.metrics.entries) },
+      freshness: { state: context.provenance.evidenceSource === "live_observation"
+        ? latestObservation(context.metrics.entries) ? "current_observation" : "not_established"
+        : "historical_observation", observedAt: latestObservation(context.metrics.entries) },
       summary,
       sections,
       evidenceGaps: gapCodes(all, context.review.restrictions),

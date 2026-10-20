@@ -4,8 +4,21 @@ import type { SolanaClaimPermissionEvidence } from "../types/solanaClaimPermissi
 import type { SolanaQualificationMetricEvidence } from "../types/solanaQualificationMetricEvidence";
 import type { PublicReportReviewRegistryRestriction } from "../types/publicReportReviewRegistry";
 import type { SolanaTokenEvidenceReport } from "../types/solanaTokenEvidenceReport";
+import { deriveSolanaQualificationMetricEvidence } from "../analysis/solanaQualificationMetricEvidence";
+import { evaluateSolanaClaimPermissions } from "../analysis/solanaClaimPermission";
+import { validatePublicReportCompositionInput } from "../validation/publicReportComposition";
+import { executeSolanaTokenEvidencePublicRequest } from "./solanaTokenEvidencePublicExecution";
+import { generateSolanaTokenEvidenceReportWithTelemetry } from "./solanaTokenEvidenceReport";
+import { presentSolanaTokenEvidenceReport } from "./solanaTokenEvidencePresentation";
+import type { SolanaTokenEvidencePublicExecutionDependencies } from "../types/solanaTokenEvidencePublicExecution";
+import type { SolanaTokenEvidenceReportTelemetryOptions } from "./solanaTokenEvidenceReport";
+import { isSolanaPublicKeySyntax } from "../validation/solanaAddress";
+import { SolanaTokenEvidenceAdmissionError } from "./solanaTokenEvidencePublicExecution";
+import { SolanaProviderRequestBudgetError } from "../types/solanaProviderRequestBudget";
+import { SolanaExecutionCancelledError } from "../types/solanaTrustedExecutionContext";
 
 export const SOLANA_INTERNAL_PUBLIC_REPORT_CONTEXT_SCHEMA_VERSION = "solana-internal-public-report-context-v1" as const;
+export const SOLANA_LIVE_REVIEW_POLICY_VERSION = "solana-live-review-policy-v1" as const;
 const CASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type SolanaPublicReportCompositionErrorCode =
@@ -19,7 +32,11 @@ export type SolanaPublicReportCompositionErrorCode =
   | "saved_evidence_unavailable"
   | "saved_evidence_invalid"
   | "review_resolution_failed"
-  | "composition_validation_failed";
+  | "composition_validation_failed"
+  | "live_mint_unverified"
+  | "live_budget_rejected"
+  | "live_admission_rejected"
+  | "live_execution_cancelled";
 
 const MESSAGES: Record<SolanaPublicReportCompositionErrorCode, string> = {
   invalid_request: "The saved-case composition request is invalid.",
@@ -33,6 +50,10 @@ const MESSAGES: Record<SolanaPublicReportCompositionErrorCode, string> = {
   saved_evidence_invalid: "Saved case evidence failed integrity validation.",
   review_resolution_failed: "The saved case could not be resolved against its review record.",
   composition_validation_failed: "Deterministic report evidence validation failed.",
+  live_mint_unverified: "The requested address could not be verified as a Solana token mint.",
+  live_budget_rejected: "The local provider-request allowance is exhausted.",
+  live_admission_rejected: "Another analysis is active or analysis is unavailable.",
+  live_execution_cancelled: "The analysis was cancelled. No completed report was returned.",
 };
 
 export interface SolanaSavedCaseCompositionRequest {
@@ -44,8 +65,8 @@ export interface SolanaValidatedPublicReportContext {
   readonly identity: {
     readonly chain: "solana";
     readonly assetId: string;
-    readonly caseId: string;
-    readonly caseContentSha256: string;
+    readonly caseId: string | null;
+    readonly caseContentSha256: string | null;
     readonly generatedAt: string;
   };
   readonly metrics: SolanaQualificationMetricEvidence;
@@ -54,13 +75,14 @@ export interface SolanaValidatedPublicReportContext {
     readonly resolutionSucceeded: true;
     readonly registrySource: "application_configuration_source_unverified";
     readonly validatorAuthority: "unverified_assertion";
-    readonly disposition: "case_bound_no_restrictions_confirmed" | "case_bound_restrictions_applied";
-    readonly recordId: string;
-    readonly analystNoteSha256: string;
+    readonly disposition: "not_applicable" | "case_bound_no_restrictions_confirmed" | "case_bound_restrictions_applied";
+    readonly recordId: string | null;
+    readonly analystNoteSha256: string | null;
     readonly restrictions: readonly PublicReportReviewRegistryRestriction[];
+    readonly livePolicyVersion?: typeof SOLANA_LIVE_REVIEW_POLICY_VERSION;
   };
   readonly provenance: {
-    readonly evidenceSource: "saved_reference_case";
+    readonly evidenceSource: "saved_reference_case" | "live_observation";
     readonly reportGeneratedAt: string;
     readonly sections: {
       readonly mint: string;
@@ -191,6 +213,76 @@ function makeContext(
       },
     },
   });
+}
+
+/**
+ * Internal live composition boundary. It owns protected execution, identity checks,
+ * deterministic derivation, D17 validation and opaque-handle registration as one operation.
+ * No caller-supplied ledger, claim set, review assertion, or context is accepted.
+ */
+export async function resolveSolanaLiveEvidenceForPublicReport(
+  assetAddress: string,
+  executionDependencies: SolanaTokenEvidencePublicExecutionDependencies,
+  options: { signal?: AbortSignal; telemetryOptions?: SolanaTokenEvidenceReportTelemetryOptions } = {},
+): Promise<SolanaPublicReportCompositionResult> {
+  try {
+    if (typeof assetAddress !== "string" || !isSolanaPublicKeySyntax(assetAddress)) fail("invalid_request");
+    const captured: { report?: SolanaTokenEvidenceReport } = {};
+    const request = { chain: "solana" as const, assetAddress };
+    await executeSolanaTokenEvidencePublicRequest(request, {
+      ...executionDependencies,
+      executePresentation: async (validatedRequest, context) => {
+        const result = await generateSolanaTokenEvidenceReportWithTelemetry(
+          validatedRequest,
+          undefined,
+          options.telemetryOptions,
+          context,
+        );
+        captured.report = result.report;
+        return presentSolanaTokenEvidenceReport(result.report);
+      },
+    }, { signal: options.signal });
+    const report = captured.report;
+    if (!report || report.assetAddress !== assetAddress || report.chain !== "solana"
+      || report.mint.status !== "present" || !report.mint.evidence.resolution.exists
+      || !report.mint.evidence.resolution.isMint || report.mint.evidence.resolution.mintAddress !== assetAddress) {
+      fail("live_mint_unverified");
+    }
+    const metrics = deriveSolanaQualificationMetricEvidence(report);
+    const claims = evaluateSolanaClaimPermissions(report);
+    const validation = validatePublicReportCompositionInput({ schemaVersion: "public-report-composition-input-v1", report, metrics, claims }, { disposition: "not_applicable" });
+    if (!validation.valid || validation.review.authority !== "unverified_assertion"
+      || validation.review.assertedDisposition !== "not_applicable" || validation.restrictionCount !== 0) {
+      fail("composition_validation_failed");
+    }
+    const holderEvidence = report.holders.status === "present" ? report.holders.evidence : null;
+    const holderStructure = holderEvidence?.holderStructure;
+    const context = deepFreeze({
+      schemaVersion: SOLANA_INTERNAL_PUBLIC_REPORT_CONTEXT_SCHEMA_VERSION,
+      identity: { chain: "solana" as const, assetId: assetAddress, caseId: null, caseContentSha256: null, generatedAt: report.generatedAt },
+      metrics, claims,
+      review: { resolutionSucceeded: true as const, registrySource: "application_configuration_source_unverified" as const,
+        validatorAuthority: "unverified_assertion" as const, disposition: "not_applicable" as const, recordId: null, analystNoteSha256: null,
+        restrictions: [], livePolicyVersion: SOLANA_LIVE_REVIEW_POLICY_VERSION },
+      provenance: { evidenceSource: "live_observation" as const, reportGeneratedAt: report.generatedAt,
+        sections: { mint: report.mint.status, market: report.market.status, holders: report.holders.status,
+          historicalTransactions: report.historicalTransactions.status },
+        holderCoverage: { enumeration: holderStructure?.enumeration.completeness ?? null,
+          enumerationStopReason: holderStructure && "acquisition" in holderStructure ? holderStructure.acquisition.stopReason : holderStructure ? "provider_terminated" : null,
+          amountCoverage: holderStructure?.amountCoverage.state ?? null, amountCoverageReason: holderStructure?.amountCoverage.reason ?? null,
+          pageCount: holderStructure?.enumeration.pageCount ?? null, contextSlots: holderStructure ? [...holderStructure.enumeration.contextSlots] : null,
+          slotConsistency: holderStructure?.enumeration.slotConsistency ?? null } },
+    }) as SolanaValidatedPublicReportContext;
+    const handle = Object.freeze(Object.create(null)) as SolanaValidatedPublicReportContextHandle;
+    contextByHandle.set(handle as object, context);
+    return { valid: true, context: handle };
+  } catch (error: unknown) {
+    if (error instanceof CompositionFailure) return failure(error.code);
+    if (error instanceof SolanaProviderRequestBudgetError) return failure("live_budget_rejected");
+    if (error instanceof SolanaTokenEvidenceAdmissionError) return failure("live_admission_rejected");
+    if (error instanceof SolanaExecutionCancelledError) return failure("live_execution_cancelled");
+    return failure("composition_validation_failed");
+  }
 }
 
 /**
