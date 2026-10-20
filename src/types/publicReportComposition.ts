@@ -1,4 +1,6 @@
 import type { SolanaClaimPermissionEvidence } from "./solanaClaimPermission";
+import type { SolanaClaimPermissionOutcome } from "./solanaClaimPermission";
+import type { SolanaQualificationMetricCompleteness } from "./solanaQualificationMetricEvidence";
 import type { SolanaQualificationMetricEvidence } from "./solanaQualificationMetricEvidence";
 import type { SolanaTokenEvidenceReport } from "./solanaTokenEvidenceReport";
 
@@ -34,10 +36,17 @@ export interface PublicReportProvenance {
 
 interface PublicReportFieldBase {
   id: PublicReportFieldId;
+  /** Optional additive copy for older token-public-report-v1 consumers. Composer values are allowlisted literals. */
+  label?: PublicReportFieldLabel;
+  explanation?: PublicReportFieldExplanation;
   evidenceState: PublicEvidenceState;
   unit: "USD" | "percent" | "addresses" | "raw_token_units" | "seconds" | null;
   explanationCode: PublicFieldExplanationCode | null;
   provenance: PublicReportProvenance | null;
+  completeness?: SolanaQualificationMetricCompleteness;
+  limitationCodes?: readonly PublicLimitationCode[];
+  technicalDetailRef?: PublicReportFieldId | null;
+  claimOutcome?: SolanaClaimPermissionOutcome | null;
 }
 
 export type PublicReportField = PublicReportFieldBase & (
@@ -80,6 +89,40 @@ export type PublicReportFieldId =
   | "token_controls.token_program" | "token_controls.mint_authority_state" | "token_controls.freeze_authority_state"
   | "token_controls.extension_inventory_summary"
   | "historical.sampled_activity" | "historical.integration_coverage";
+export type PublicReportFieldLabel =
+  | "Token network" | "Token address" | "Token name" | "Token symbol"
+  | "Price" | "Liquidity in selected pool" | "Reported 24-hour volume" | "Reported market capitalization" | "Reported fully diluted value"
+  | "Observed holder addresses" | "Observed balance distribution"
+  | "Largest observed holder share" | "Top 5 observed holder share" | "Top 10 observed holder share" | "Top 20 observed holder share"
+  | "Token program" | "Mint authority setting" | "Freeze authority setting" | "Token-2022 extension inventory"
+  | "Historical activity sample" | "Historical transaction integration";
+export type PublicReportFieldExplanation =
+  | "The network associated with this saved evidence."
+  | "The requested token address."
+  | "A token name was not included in the validated evidence."
+  | "A token symbol was not included in the validated evidence."
+  | "Price reported for one selected market pool."
+  | "Liquidity reported for one selected pool; one observation does not show whether it persists."
+  | "Reported volume for the selected pool and 24-hour window; this does not establish trading quality."
+  | "Provider-reported valuation only; its denominator and scope are not established."
+  | "A count of observed owner-authority addresses, not a count of people or economic owners."
+  | "Describes the retrieved holder records only; it does not establish the full holder population."
+  | "Share of reported token supply represented by the largest observed owner authority; not economic control."
+  | "Share of reported token supply represented by the five largest observed owner authorities; not economic control."
+  | "Share of reported token supply represented by the ten largest observed owner authorities; not economic control."
+  | "Share of reported token supply represented by the twenty largest observed owner authorities; not economic control."
+  | "The program identified for this token mint."
+  | "The base mint-authority setting only; this is not a security assessment."
+  | "The base freeze-authority setting only; this is not a security assessment."
+  | "Presence-only inventory of recognized mint extensions; it does not establish extension behavior or intent."
+  | "Historical evidence applies only to the selected bounded sample, not all token activity."
+  | "Integration coverage applies only to supplied transaction candidates."
+  | "No historical evidence was requested."
+  | "The selected pool orientation does not support a token-oriented value."
+  | "Largest-holder concentration is unavailable. The reported token supply is positive, but no positive token balances were found in the retrieved records."
+  | "The evidence is unavailable or was not sufficient for this claim."
+  | "Bounded historical evidence is available for the selected sample."
+  | "Transaction integration evidence applies only to the supplied candidate set.";
 export type PublicReportSectionId = "identity" | "market" | "holders" | "token_controls" | "historical";
 export type PublicLimitationCode =
   | "selected_pool_only" | "single_snapshot" | "partial_enumeration" | "partial_amount_coverage"
