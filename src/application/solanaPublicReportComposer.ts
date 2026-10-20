@@ -208,6 +208,8 @@ function allowedValue(definition: FieldDefinition, metric: SolanaQualificationMe
 function explanationCode(metric: SolanaQualificationMetricEvidenceEntry | null, restriction: PublicRestrictionOverlayEntry | undefined, emptyPopulation: boolean): PublicFieldExplanationCode | null {
   if (restriction) return restriction.explanationCode;
   if (emptyPopulation || metric?.reason === "orientation_unsupported") return "source_unavailable";
+  if (metric?.id === "market.primary_pool.price_usd"
+    && (metric.status === "unavailable" || metric.status === "not_attempted" || metric.status === "unknown")) return "source_unavailable";
   if (metric?.status === "not_requested") return "source_not_requested";
   if (metric?.completeness === "partial") return "partial_coverage";
   if (metric?.status === "conflicting") return "claim_withheld";

@@ -135,6 +135,28 @@ function descendants(element) {
 
 test("browser sends a live address to the local route and keeps the synthetic mode separately labeled", async () => {
   const report = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
+  report.token.name = "Synthetic Test Token";
+  report.token.symbol = "SYN";
+  const liveReport = JSON.parse(JSON.stringify(report));
+  liveReport.token.name = null;
+  liveReport.token.symbol = null;
+  const liveAddress = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+  liveReport.token.assetId = liveAddress;
+  const livePrice = liveReport.sections.find((section) => section.id === "market").fields.find((field) => field.id === "market.price");
+  livePrice.evidenceState = "unavailable";
+  livePrice.explanationCode = "source_unavailable";
+  livePrice.explanation = "The evidence is unavailable or was not sufficient for this claim.";
+  livePrice.claimOutcome = "withheld_insufficient";
+  livePrice.visibility = "withheld";
+  delete livePrice.value;
+  liveReport.summary = liveReport.summary.filter((field) => field.id !== "market.price");
+  const technicalPrice = liveReport.technicalDetails.find((field) => field.id === "market.price");
+  technicalPrice.evidenceState = "unavailable";
+  technicalPrice.explanationCode = "source_unavailable";
+  technicalPrice.explanation = livePrice.explanation;
+  technicalPrice.claimOutcome = "withheld_insufficient";
+  technicalPrice.visibility = "withheld";
+  delete technicalPrice.value;
   const ids = ["address-form", "asset-address", "address-status", "load-demo", "report-status", "report-root", "demo-banner"];
   const elements = new Map(ids.map((id) => [id, mockNode(id)]));
   const document = { getElementById: (id) => elements.get(id), createElement: (tagName) => mockNode(tagName) };
@@ -154,7 +176,7 @@ test("browser sends a live address to the local route and keeps the synthetic mo
       if (url === "/public-report.json") { localSampleRequests += 1; return { ok: true, json: async () => report }; }
       assert.equal(url, "/api/report");
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { chain: "solana", assetAddress: "user-entered-address" });
+      assert.deepEqual(JSON.parse(options.body), { chain: "solana", assetAddress: liveAddress });
       assert.equal(elements.get("address-form").querySelector("button[type='submit']").disabled, true,
         "duplicate submission remains disabled while the request is pending");
       assert.equal(elements.get("load-demo").disabled, true);
@@ -165,12 +187,12 @@ test("browser sends a live address to the local route and keeps the synthetic mo
   });
   vm.runInContext(fs.readFileSync(path.join(DEMO_ROOT, "app.js"), "utf8"), context);
 
-  elements.get("asset-address").value = "user-entered-address";
+  elements.get("asset-address").value = liveAddress;
   let defaultPrevented = false;
   const firstSubmission = elements.get("address-form").listeners.submit({ preventDefault() { defaultPrevented = true; } });
   await elements.get("address-form").listeners.submit({ preventDefault() {} });
   assert.equal(liveRequests, 1, "a second submit is ignored while the first request is active");
-  releaseLiveRequest({ ok: true, json: async () => report });
+  releaseLiveRequest({ ok: true, json: async () => liveReport });
   await firstSubmission;
   assert.equal(defaultPrevented, true);
   assert.match(elements.get("address-status").textContent, /Live evidence report prepared/);
@@ -178,12 +200,44 @@ test("browser sends a live address to the local route and keeps the synthetic mo
   assert.equal(localSampleRequests, 0);
   assert.equal(elements.get("demo-banner").hidden, false);
   assert.match(descendantText(elements.get("demo-banner")), /Live evidence/);
-  assert.match(descendantText(elements.get("report-root")), /Live evidence subject/);
+  let renderedLive = descendantText(elements.get("report-root"));
+  assert.match(renderedLive, /Live evidence subject/);
+  assert.match(renderedLive, /Token analysis/);
+  assert.match(renderedLive, /Token name and symbol have not been verified/);
+  assert.match(renderedLive, /Solana address EPjF…Dt1v/);
+  const addressDetails = descendants(elements.get("report-root")).find((element) => element.className === "token-address");
+  assert.ok(addressDetails);
+  assert.equal(addressDetails.children.find((element) => element.tagName === "code").textContent, liveAddress,
+    "the complete address remains available in the expandable identity details");
+  assert.match(renderedLive, /A price could not be established from the available market evidence/);
+  assert.match(renderedLive, /does not establish whether no eligible pool was available or a price was not reported/);
+  assert.doesNotMatch(renderedLive, /\$1\.25/);
+
+  livePrice.explanation = "The selected pool orientation does not support a token-oriented value.";
+  await elements.get("address-form").listeners.submit({ preventDefault() {} });
+  renderedLive = descendantText(elements.get("report-root"));
+  assert.match(renderedLive, /selected pool lists the token as the quote asset/);
+  assert.doesNotMatch(renderedLive, /\$1\.25/);
+
+  livePrice.evidenceState = "unknown";
+  livePrice.explanation = "The evidence is unavailable or was not sufficient for this claim.";
+  await elements.get("address-form").listeners.submit({ preventDefault() {} });
+  renderedLive = descendantText(elements.get("report-root"));
+  assert.match(renderedLive, /does not establish a price or why one could not be shown/);
+
+  livePrice.evidenceState = "conflicting";
+  livePrice.explanationCode = "claim_withheld";
+  await elements.get("address-form").listeners.submit({ preventDefault() {} });
+  renderedLive = descendantText(elements.get("report-root"));
+  assert.match(renderedLive, /available price evidence conflicts/);
 
   await elements.get("load-demo").listeners.click();
   assert.equal(localSampleRequests, 1);
   assert.equal(elements.get("demo-banner").hidden, false);
   assert.match(descendantText(elements.get("report-root")), /Synthetic report subject/);
+  assert.match(descendantText(elements.get("report-root")), /Synthetic Test Token/);
+  assert.match(descendantText(elements.get("report-root")), /Symbol: SYN/);
+  assert.doesNotMatch(descendantText(elements.get("report-root")), /Token name and symbol have not been verified/);
   assert.match(elements.get("address-status").textContent, /does not describe an address entered above/);
   const rendered = descendantText(elements.get("report-root"));
   assert.match(rendered, /\$500,000/);

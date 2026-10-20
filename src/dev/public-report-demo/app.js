@@ -98,9 +98,35 @@
     const wrapper = node("article", options.card ? "summary-card" : "data-item");
     wrapper.append(node("div", options.card ? "card-label" : "data-item-label", field.label || "Evidence field"));
     wrapper.append(node("div", options.card ? "card-value" : "data-item-value", formatValue(field)));
-    if (field.explanation) wrapper.append(node("p", options.card ? "card-note" : "data-item-note", field.explanation));
+    const explanation = metricExplanation(field);
+    if (explanation) wrapper.append(node("p", options.card ? "card-note" : "data-item-note", explanation));
     addObservation(wrapper, field);
     return wrapper;
+  }
+
+  function metricExplanation(field) {
+    if (field?.id !== "market.price") return field?.explanation;
+    if (field.explanation === "The selected pool orientation does not support a token-oriented value.") {
+      return "The selected pool lists the token as the quote asset, so its reported price cannot be treated as this token’s price.";
+    }
+    if (field.visibility === "withheld" && field.evidenceState === "partial") {
+      return "The price is not shown because the available evidence did not meet the claim requirements.";
+    }
+    if (field.evidenceState === "unavailable") {
+      return "A price could not be established from the available market evidence. The report does not establish whether no eligible pool was available or a price was not reported.";
+    }
+    if (field.evidenceState === "unknown") {
+      return "The available evidence does not establish a price or why one could not be shown.";
+    }
+    if (field.evidenceState === "conflicting") {
+      return "The available price evidence conflicts, so no single value is shown.";
+    }
+    if (field.evidenceState === "not_requested") return "Price information was not requested for this report.";
+    return field.explanation;
+  }
+
+  function abbreviatedAddress(address) {
+    return address.length > 12 ? `${address.slice(0, 4)}…${address.slice(-4)}` : address;
   }
 
   function appendSection(parent, title, intro) {
@@ -206,9 +232,16 @@
     const heading = node("div", "token-heading");
     const headingText = node("div");
     headingText.append(node("p", "section-kicker", mode === "live" ? "Live evidence subject" : "Synthetic report subject"));
-    headingText.append(node("h2", "", report.token.name || "Unnamed token"));
+    const tokenName = typeof report.token.name === "string" && report.token.name.trim() ? report.token.name.trim() : null;
+    const tokenSymbol = typeof report.token.symbol === "string" && report.token.symbol.trim() ? report.token.symbol.trim() : null;
+    headingText.append(node("h2", "", tokenName || "Token analysis"));
+    if (tokenSymbol) headingText.append(node("p", "muted", `Symbol: ${tokenSymbol}`));
+    if (!tokenName && !tokenSymbol) headingText.append(node("p", "muted", "Token name and symbol have not been verified."));
     heading.append(headingText);
-    heading.append(node("div", "token-address", report.token.assetId));
+    const addressDetails = node("details", "token-address");
+    addressDetails.append(node("summary", "", `Solana address ${abbreviatedAddress(report.token.assetId)}`));
+    addressDetails.append(node("code", "", report.token.assetId));
+    heading.append(addressDetails);
     reportRoot.append(heading);
 
     const overview = appendSection(reportRoot, "At a glance", "A short summary of the available token evidence.");

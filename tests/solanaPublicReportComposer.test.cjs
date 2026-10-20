@@ -38,7 +38,7 @@ async function makeReport(mintAddress = MINT, options = {}) {
     chainId: "solana", poolAddress: key(100 + index), dexId: "synthetic-dex",
     baseTokenAddress: options.unsupportedOrientation ? quote : mintAddress,
     quoteTokenAddress: options.unsupportedOrientation ? mintAddress : quote,
-    priceUsd: "1.25", marketCapUsd: "1250000", fdvUsd: "1500000", liquidityUsd: "500000",
+    priceUsd: options.priceNotReported ? null : "1.25", marketCapUsd: "1250000", fdvUsd: "1500000", liquidityUsd: "500000",
     volumeUsd: { h24: "75000" }, poolCreatedAt: null,
   }));
   const tokenProgram = options.token2022 ? "token-2022" : "spl-token";
@@ -260,8 +260,30 @@ test("unsupported pool orientation is withheld with a safe explanation and no so
   assert.equal(result.valid, true);
   const price = field(result.report, "market.price", "market");
   assert.equal(price.visibility, "withheld");
+  assert.equal(price.explanationCode, "source_unavailable");
   assert.equal(price.explanation, "The selected pool orientation does not support a token-oriented value.");
   assert.equal(JSON.stringify(result.report).includes("poolAddress"), false);
+});
+
+test("available market price is preserved and unavailable price reasons use the existing safe gap code", async () => {
+  const availableContext = await resolvedContext();
+  const available = composeSolanaPublicReport(availableContext.handle);
+  assert.equal(available.valid, true);
+  const permittedPrice = field(available.report, "market.price", "market");
+  assert.equal(permittedPrice.value, "1.25");
+  assert.equal(permittedPrice.visibility, "summary");
+  assert.equal(permittedPrice.claimOutcome, "permitted");
+
+  for (const options of [{ priceNotReported: true }, { noPool: true }]) {
+    const { handle } = await resolvedContext(MINT, options);
+    const result = composeSolanaPublicReport(handle);
+    assert.equal(result.valid, true);
+    const price = field(result.report, "market.price", "market");
+    assert.equal(price.evidenceState, "unavailable");
+    assert.equal(price.explanationCode, "source_unavailable");
+    assert.equal(price.visibility, "withheld");
+    assert.equal(Object.hasOwn(price, "value"), false);
+  }
 });
 
 test("Token-2022 controls are presence-only and never expose extension IDs or payloads", async () => {
