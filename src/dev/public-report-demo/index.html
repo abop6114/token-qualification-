@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Token Qualification Engine — Evidence report</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Token Qualification Engine home">
+        <span class="brand-mark" aria-hidden="true">TQ</span>
+        <span>Token Qualification Engine</span>
+      </a>
+      <span class="prototype-tag">Local prototype</span>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">Evidence, explained</p>
+        <h1 id="page-title">Understand a token from its evidence</h1>
+        <p class="intro-copy">Review reported market information, holder distribution, token settings, and what the available data cannot tell us.</p>
+      </section>
+
+      <section class="lookup panel" aria-labelledby="lookup-title">
+        <div>
+          <h2 id="lookup-title">Enter a Solana token address</h2>
+          <p>Live analysis is not available in this prototype. An address entered here is not sent anywhere.</p>
+        </div>
+        <form id="address-form" novalidate>
+          <label for="asset-address">Token address</label>
+          <div class="lookup-row">
+            <input id="asset-address" name="asset-address" autocomplete="off" spellcheck="false" placeholder="Paste a Solana token address" aria-describedby="address-help address-status">
+            <button class="button button-secondary" type="submit">Check availability</button>
+          </div>
+          <p id="address-help" class="muted">This prototype does not analyze submitted addresses.</p>
+          <p id="address-status" class="status-message" role="status" aria-live="polite"></p>
+        </form>
+        <div class="demo-choice">
+          <span>Want to see the report format?</span>
+          <button id="load-demo" class="button button-primary" type="button">Load synthetic demonstration</button>
+        </div>
+      </section>
+
+      <div id="demo-banner" class="demo-banner" hidden>
+        <strong>Synthetic demonstration</strong>
+        <span>This is test data, not a real token analysis.</span>
+      </div>
+      <div id="report-status" role="status" aria-live="polite"></div>
+      <div id="report-root"></div>
+    </main>
+
+    <footer>
+      <p>Evidence summary only. This prototype does not provide a token qualification verdict or investment recommendation.</p>
+    </footer>
+  </body>
+</html>
