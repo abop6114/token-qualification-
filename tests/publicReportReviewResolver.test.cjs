@@ -8,7 +8,7 @@ const { evaluateSolanaClaimPermissions } = require("../dist/analysis/solanaClaim
 const { generateSolanaTokenEvidenceReport } = require("../dist/application/solanaTokenEvidenceReport.js");
 const { aggregateSolanaReportOperationalTelemetry } = require("../dist/application/solanaReportOperationalTelemetry.js");
 const { canonicalizeSolanaReferenceCaseValue } = require("../dist/application/solanaReferenceCase.js");
-const { createApplicationControlledPublicReportReviewResolver } = require("../dist/application/publicReportReviewResolver.js");
+const { createApplicationControlledPublicReportReviewResolver, readInternalValidatedPublicReportSnapshot } = require("../dist/application/publicReportReviewResolver.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
 
@@ -130,6 +130,21 @@ test("valid app-configured no-restrictions record resolves deterministically wit
   assert.equal("caseArtifactJson" in first.resolution, false);
   assert.equal("analystNoteJson" in first.resolution, false);
   assert.equal(injectedMockCalls, callsBefore, "resolver performs no acquisition/provider operations");
+  const snapshot = readInternalValidatedPublicReportSnapshot(first);
+  assert.ok(snapshot);
+  assert.deepEqual(snapshot.referenceCase, value.caseValue);
+  assert.deepEqual(snapshot.report, value.report);
+  assert.equal(snapshot.registryRecord.recordId, value.record.recordId);
+  assert.equal(snapshot.registrySchemaVersion, "public-report-review-registry-v1");
+  assert.equal(snapshot.caseArtifactBytesSha256, sha256(value.caseArtifactJson));
+  assert.equal(snapshot.analystNoteBytesSha256, sha256(value.analystNoteJson));
+  assert.deepEqual(snapshot.metrics, deriveSolanaQualificationMetricEvidence(value.report));
+  assert.deepEqual(snapshot.claims, evaluateSolanaClaimPermissions(value.report));
+  assert.equal(snapshot.validation.valid, true);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.registryRecord.restrictions), true);
+  assert.equal(readInternalValidatedPublicReportSnapshot({ ...first }), null, "copied/fabricated results cannot access the private snapshot");
+  assert.equal(readInternalValidatedPublicReportSnapshot({ valid: true, resolution: first.resolution }), null);
 });
 
 test("valid structured PYUSD restrictions are bound to case and raw note bytes", async () => {

@@ -9,6 +9,8 @@ const service = require("../dist/application/solanaPublicReportCompositionServic
 const validatorModule = require("../dist/validation/publicReportComposition.js");
 const { generateSolanaTokenEvidenceReport } = require("../dist/application/solanaTokenEvidenceReport.js");
 const { aggregateSolanaReportOperationalTelemetry } = require("../dist/application/solanaReportOperationalTelemetry.js");
+const { deriveSolanaQualificationMetricEvidence } = require("../dist/analysis/solanaQualificationMetricEvidence.js");
+const { evaluateSolanaClaimPermissions } = require("../dist/analysis/solanaClaimPermission.js");
 const { canonicalizeSolanaReferenceCaseValue } = require("../dist/application/solanaReferenceCase.js");
 const { encodeSolanaPublicKey } = require("../dist/validation/solanaAddress.js");
 const { SOLANA_TOKEN_PROGRAM_IDS } = require("../dist/types/solana.js");
@@ -37,10 +39,8 @@ function tokenAccountData(mint, owner, amount) {
   return bytes.toString("base64");
 }
 
-async function makeReport(mintAddress, poolCount = 1) {
+async function makeReport(mintAddress, poolCount = 1, holderRows = 1) {
   const quote = encodeSolanaPublicKey(Buffer.alloc(32, 90));
-  const owner = encodeSolanaPublicKey(Buffer.alloc(32, 71));
-  const accountAddress = encodeSolanaPublicKey(Buffer.alloc(32, 72));
   const pools = Array.from({ length: poolCount }, (_, i) => {
     const poolBytes = Buffer.alloc(32);
     poolBytes.writeUInt32LE(100 + i, 0);
@@ -72,9 +72,26 @@ async function makeReport(mintAddress, poolCount = 1) {
     getMarkets: async () => { fakeTransportCalls += 1; return pools; },
     getTokenAccountPages: async () => {
       fakeTransportCalls += 1;
+      const pages = [];
+      for (let start = 0; start < holderRows; start += 5000) {
+        const count = Math.min(5000, holderRows - start);
+        const accounts = Array.from({ length: count }, (_, offset) => {
+          const index = start + offset;
+          const addressBytes = Buffer.alloc(32);
+          addressBytes.writeUInt32LE(index + 1, 0);
+          addressBytes.writeUInt32LE(73, 4);
+          const ownerBytes = Buffer.alloc(32);
+          ownerBytes.writeUInt32LE(index + 500_000, 0);
+          return { address: encodeSolanaPublicKey(addressBytes), programOwner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"],
+            dataBase64: tokenAccountData(mintAddress, encodeSolanaPublicKey(ownerBytes), holderRows === 1 ? 1_000_000 : 1), reportedSpace: 165 };
+        });
+        const cursorBytes = Buffer.alloc(32);
+        cursorBytes.writeUInt32LE(start + count + 1000, 0);
+        pages.push({ accounts, paginationKey: start + count < holderRows ? encodeSolanaPublicKey(cursorBytes) : null, contextSlot: 101 + pages.length });
+      }
+      if (holderRows === 0) pages.push({ accounts: [], paginationKey: null, contextSlot: 101 });
       return { status: "available", completeness: "complete", stopReason: "provider_terminated", configuredMaxPages: 20,
-        requestedPageSize: 5000, pages: [{ accounts: [{ address: accountAddress, programOwner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"],
-          dataBase64: tokenAccountData(mintAddress, owner, 1_000_000), reportedSpace: 165 }], paginationKey: null, contextSlot: 101 }] };
+        requestedPageSize: 5000, pages };
     },
     now: () => new Date(NOW),
   });
@@ -116,9 +133,9 @@ function configFor(records, artifacts, overrides = {}) {
     readAnalystNoteJson: async (caseId) => artifacts.get(caseId)?.noteJson ?? null,
     ...overrides };
 }
-async function fixture(mintAddress = OTHER_MINT, poolCount = 1, restrictionRows = null) {
-  const report = await makeReport(mintAddress, poolCount);
-  const c = makeCase(report);
+async function fixture(mintAddress = OTHER_MINT, poolCount = 1, restrictionRows = null, caseId = CASE_ID, holderRows = 1) {
+  const report = await makeReport(mintAddress, poolCount, holderRows);
+  const c = makeCase(report, caseId);
   const noteJson = makeNote(c.value);
   const restrictions = restrictionRows ?? (mintAddress === PYUSD ? PYUSD_RESTRICTIONS : []);
   const record = makeRecord(c.value, noteJson, restrictions.length ? {
@@ -161,6 +178,8 @@ test("valid configured saved case resolves into an opaque, bounded frozen contex
     assert.equal(context.identity.assetId, value.caseValue.identity.mintAddress);
     assert.equal(context.metrics.entries.length > 0, true);
     assert.equal(context.claims.claims.length > 0, true);
+    assert.deepEqual(context.metrics, deriveSolanaQualificationMetricEvidence(value.report));
+    assert.deepEqual(context.claims, evaluateSolanaClaimPermissions(value.report));
     assert.equal(context.provenance.holderCoverage.enumeration, "complete");
     assert.equal(Object.isFrozen(context), true);
     assert.equal(Object.isFrozen(context.metrics.entries), true);
@@ -194,6 +213,44 @@ test("PYUSD-like provider_reported_only restrictions survive validation as metad
     assert.equal(context.claims.claims.find((claim) => claim.id === "market.market_cap_usd").outcome, "permitted",
       "D10 decision remains unchanged; overlay is metadata for the future composer");
   });
+});
+
+test("unavailable concentration and not-requested history claim outcomes are reused exactly", async () => {
+  const value = await fixture(OTHER_MINT, 1, null, CASE_ID, 0);
+  await withConfig(value.config, async () => {
+    const result = await resolve(value);
+    assert.equal(result.valid, true);
+    const context = service.readValidatedSolanaPublicReportContext(result.context);
+    assert.deepEqual(context.claims, evaluateSolanaClaimPermissions(value.report));
+    assert.equal(context.claims.claims.find((claim) => claim.id === "holders.concentration_top1").outcome, "withheld_insufficient");
+    assert.equal(context.claims.claims.find((claim) => claim.id === "historical.sampled_activity").outcome, "not_evaluated_not_requested");
+  });
+});
+
+test("alternating cases remain isolated and repeated composition is deterministic", async () => {
+  const firstCase = await fixture(OTHER_MINT, 1, null, CASE_ID);
+  const secondCaseId = "22222222-3333-4444-8555-666666666666";
+  const secondCase = await fixture(PYUSD, 2, null, secondCaseId);
+  const callsBefore = fakeTransportCalls;
+  await withConfig(firstCase.config, async () => {
+    const first = await resolve(firstCase);
+    const repeated = await resolve(firstCase);
+    assert.equal(first.valid, true);
+    assert.equal(repeated.valid, true);
+    assert.deepEqual(service.readValidatedSolanaPublicReportContext(first.context),
+      service.readValidatedSolanaPublicReportContext(repeated.context));
+    assert.equal(service.readValidatedSolanaPublicReportContext(first.context).identity.caseId, CASE_ID);
+  });
+  await withConfig(secondCase.config, async () => {
+    const second = await resolve(secondCase);
+    assert.equal(second.valid, true);
+    const context = service.readValidatedSolanaPublicReportContext(second.context);
+    assert.equal(context.identity.caseId, secondCaseId);
+    assert.equal(context.identity.assetId, PYUSD);
+    assert.deepEqual(context.review.restrictions, PYUSD_RESTRICTIONS);
+    assert.deepEqual(context.claims, evaluateSolanaClaimPermissions(secondCase.report));
+  });
+  assert.equal(fakeTransportCalls, callsBefore, "resolution reuses saved evidence and performs no provider calls");
 });
 
 test("suppress_value restriction propagates for a non-PYUSD case when D17-D1 accepts it", async () => {
@@ -300,12 +357,28 @@ test("D17-D1 validation failure returns a sanitized failure and no context", asy
   let calls = 0;
   validatorModule.validatePublicReportCompositionInput = (...args) => {
     calls += 1;
-    return calls === 1 ? original(...args) : { schemaVersion: "public-report-validation-result-v1", valid: false,
+    return { schemaVersion: "public-report-validation-result-v1", valid: false,
       error: { code: "metric_ledger_mismatch", message: "secret report content" } };
   };
   try {
-    await withConfig(value.config, async () => assertFailure(await resolve(value), "composition_validation_failed", "secret report content"));
+    await withConfig(value.config, async () => assertFailure(await resolve(value), "saved_evidence_invalid", "secret report content"));
+    assert.equal(calls, 1, "resolver validation runs once; invalid validated evidence is rejected before context construction");
   } finally { validatorModule.validatePublicReportCompositionInput = original; }
+});
+
+test("a fabricated successful resolver result is rejected without partial context", async () => {
+  const value = await fixture();
+  const resolverModule = require("../dist/application/publicReportReviewResolver.js");
+  // The service deliberately exposes no injection seam; a structurally forged result cannot
+  // acquire the module-private WeakMap snapshot even when it copies valid public metadata.
+  const forged = { valid: true, resolution: { caseId: CASE_ID } };
+  assert.equal(resolverModule.readInternalValidatedPublicReportSnapshot(forged), null);
+  assert.equal(resolverModule.readInternalValidatedPublicReportSnapshot({ ...forged }), null);
+  const originalFactory = resolverModule.createApplicationControlledPublicReportReviewResolver;
+  resolverModule.createApplicationControlledPublicReportReviewResolver = () => ({ valid: true, resolve: () => forged });
+  try {
+    await withConfig(value.config, async () => assertFailure(await resolve(value), "review_resolution_failed"));
+  } finally { resolverModule.createApplicationControlledPublicReportReviewResolver = originalFactory; }
 });
 
 test("untrusted handles and caller-controlled review metadata cannot reveal internal context", async () => {
@@ -331,7 +404,7 @@ test("application default configuration is controlled and empty rather than call
   } finally { configModule.getSolanaPublicReportCompositionConfiguration = original; }
 });
 
-test("combined resolution and D17-D1 validation performance: synthetic report sizes", async () => {
+test("combined resolution and composition performance: synthetic market-pool sizes", async () => {
   const sizes = [1, 40, 300];
   const iterations = 12;
   const rssStart = process.memoryUsage().rss;
@@ -354,5 +427,46 @@ test("combined resolution and D17-D1 validation performance: synthetic report si
       p95Ms: samples[Math.ceil(samples.length * 0.95) - 1] });
   }
   const rssEnd = process.memoryUsage().rss;
-  console.log(`D17-D2-B2 benchmark node=${process.version} platform=${process.platform}/${process.arch} rssStartMiB=${(rssStart / 1024 / 1024).toFixed(1)} rssEndMiB=${(rssEnd / 1024 / 1024).toFixed(1)} rssDeltaMiB=${((rssEnd - rssStart) / 1024 / 1024).toFixed(1)} ${JSON.stringify(results)}`);
+  console.log(`D17-P3 pool benchmark node=${process.version} platform=${process.platform}/${process.arch} rssStartMiB=${(rssStart / 1024 / 1024).toFixed(1)} rssEndMiB=${(rssEnd / 1024 / 1024).toFixed(1)} rssDeltaMiB=${((rssEnd - rssStart) / 1024 / 1024).toFixed(1)} ${JSON.stringify(results)}`);
+});
+
+test("holder-row scaling benchmark with bounded synthetic reports", { skip: process.env.TQE_PERF_HOLDER !== "1" }, async () => {
+  const sizes = [1, 1000, 10000, 100000];
+  const results = [];
+  for (const rows of sizes) {
+    const rssBefore = process.memoryUsage().rss;
+    const heapBefore = process.memoryUsage().heapUsed;
+    const value = await fixture(OTHER_MINT, 1, null, CASE_ID, rows);
+    const bytes = Buffer.byteLength(value.caseJson, "utf8") + Buffer.byteLength(value.noteJson, "utf8");
+    const samples = [];
+    let accepted = false;
+    let failureCode = null;
+    if (bytes <= 20 * 1024 * 1024) {
+      await withConfig(value.config, async () => {
+        const warmup = await resolve(value);
+        accepted = warmup.valid;
+        if (!warmup.valid) failureCode = warmup.error.code;
+        if (accepted) {
+          const iterations = rows >= 10000 ? 1 : 8;
+          for (let index = 0; index < iterations; index += 1) {
+            const start = performance.now();
+            const result = await resolve(value);
+            samples.push(performance.now() - start);
+            if (!result.valid) { accepted = false; failureCode = result.error.code; break; }
+          }
+        }
+      });
+    }
+    samples.sort((left, right) => left - right);
+    const medianMs = samples.length ? (samples[Math.floor((samples.length - 1) / 2)] + samples[Math.ceil((samples.length - 1) / 2)]) / 2 : null;
+    const p95Ms = samples.length ? samples[Math.ceil(samples.length * 0.95) - 1] : null;
+    results.push({ requestedHolderRows: rows, observedTokenAccounts: value.report.holders.evidence.holderStructure.tokenAccountCount,
+      observedOwnerAuthorities: value.report.holders.evidence.holderStructure.rawOwnerCount,
+      caseAndNoteBytes: bytes, iterations: samples.length, acceptedByExistingValidation: accepted, failureCode,
+      skippedAboveExisting20MiBCap: bytes > 20 * 1024 * 1024,
+      medianMs: medianMs === null ? null : Number(medianMs.toFixed(3)), p95Ms: p95Ms === null ? null : Number(p95Ms.toFixed(3)),
+      rssDeltaMiB: Number(((process.memoryUsage().rss - rssBefore) / 1024 / 1024).toFixed(1)),
+      heapDeltaMiB: Number(((process.memoryUsage().heapUsed - heapBefore) / 1024 / 1024).toFixed(1)) });
+  }
+  console.log(`D17-P3 holder benchmark node=${process.version} platform=${process.platform}/${process.arch} ${JSON.stringify(results)}`);
 });

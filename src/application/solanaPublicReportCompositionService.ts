@@ -1,9 +1,5 @@
-import { evaluateSolanaClaimPermissions } from "../analysis/solanaClaimPermission";
-import { deriveSolanaQualificationMetricEvidence } from "../analysis/solanaQualificationMetricEvidence";
-import { verifySolanaReferenceCaseArtifact } from "./solanaReferenceCase";
-import { createApplicationControlledPublicReportReviewResolver } from "./publicReportReviewResolver";
+import { createApplicationControlledPublicReportReviewResolver, readInternalValidatedPublicReportSnapshot } from "./publicReportReviewResolver";
 import { getSolanaPublicReportCompositionConfiguration } from "./solanaPublicReportCompositionConfiguration";
-import { validatePublicReportCompositionInput } from "../validation/publicReportComposition";
 import type { SolanaClaimPermissionEvidence } from "../types/solanaClaimPermission";
 import type { SolanaQualificationMetricEvidence } from "../types/solanaQualificationMetricEvidence";
 import type { PublicReportReviewRegistryRestriction } from "../types/publicReportReviewRegistry";
@@ -131,6 +127,8 @@ function validateRequest(input: unknown): asserts input is SolanaSavedCaseCompos
 
 function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   if (typeof value !== "object" || value === null || seen.has(value)) return value;
+  // Resolver snapshots and their metric/claim payloads are already recursively frozen.
+  if (Object.isFrozen(value)) return value;
   seen.add(value);
   for (const key of Reflect.ownKeys(value)) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -236,40 +234,34 @@ export async function resolveSolanaSavedCaseForPublicReport(input: unknown): Pro
         || resolutionResult.error.code === "analyst_note_invalid" || resolutionResult.error.code === "note_binding_mismatch") fail("saved_evidence_invalid");
       fail("review_resolution_failed");
     }
-    let verified;
-    try { verified = verifySolanaReferenceCaseArtifact(caseArtifactJson); }
-    catch { fail("saved_evidence_invalid"); }
-    if (verified.referenceCase.caseId !== input.caseId
-      || verified.referenceCase.identity.chain !== resolutionResult.resolution.chain
-      || verified.referenceCase.identity.mintAddress !== resolutionResult.resolution.mintAddress
-      || verified.referenceCase.contentHash.digestHex !== resolutionResult.resolution.caseContentSha256) fail("saved_evidence_invalid");
+    const snapshot = readInternalValidatedPublicReportSnapshot(resolutionResult);
+    if (!snapshot || snapshot.referenceCase.caseId !== input.caseId
+      || snapshot.registrySchemaVersion !== "public-report-review-registry-v1"
+      || snapshot.resolution !== resolutionResult.resolution
+      || snapshot.report !== snapshot.referenceCase.evidenceReport
+      || snapshot.referenceCase.identity.chain !== snapshot.resolution.chain
+      || snapshot.referenceCase.identity.mintAddress !== snapshot.resolution.mintAddress
+      || snapshot.registryRecord.recordId !== snapshot.resolution.recordId
+      || snapshot.registryRecord.recordVersion !== snapshot.resolution.recordVersion
+      || snapshot.registryRecord.caseId !== snapshot.resolution.caseId
+      || snapshot.registryRecord.chain !== snapshot.resolution.chain
+      || snapshot.registryRecord.mintAddress !== snapshot.resolution.mintAddress
+      || snapshot.registryRecord.caseContentSha256 !== snapshot.referenceCase.contentHash.digestHex
+      || snapshot.registryRecord.analystNoteSha256 !== snapshot.analystNoteBytesSha256
+      || snapshot.registryRecord.disposition !== snapshot.resolution.disposition
+      || snapshot.registryRecord.reviewerPseudonym !== snapshot.resolution.reviewerPseudonym
+      || snapshot.registryRecord.reviewedAt !== snapshot.resolution.reviewedAt
+      || snapshot.registryRecord.restrictions !== snapshot.resolution.restrictions
+      || snapshot.analystNoteBytesSha256 !== snapshot.resolution.analystNoteSha256
+      || snapshot.analystNoteIdentity.caseId !== input.caseId
+      || snapshot.analystNoteIdentity.caseHash !== snapshot.referenceCase.contentHash.digestHex
+      || snapshot.analystNoteIdentity.reviewerPseudonym !== snapshot.resolution.reviewerPseudonym
+      || snapshot.analystNoteIdentity.reviewedAt !== snapshot.resolution.reviewedAt
+      || snapshot.validation.review.authority !== "unverified_assertion"
+      || snapshot.validation.review.assertedDisposition !== snapshot.resolution.disposition
+      || snapshot.validation.restrictionCount !== snapshot.resolution.restrictions.length) fail("review_resolution_failed");
 
-    const report = verified.referenceCase.evidenceReport;
-    let metrics: SolanaQualificationMetricEvidence;
-    let claims: SolanaClaimPermissionEvidence;
-    try {
-      metrics = deriveSolanaQualificationMetricEvidence(report);
-      claims = evaluateSolanaClaimPermissions(report);
-    } catch { fail("composition_validation_failed"); }
-    const compositionInput = { schemaVersion: "public-report-composition-input-v1" as const, report, metrics, claims };
-    const reviewAssertion = resolutionResult.resolution.disposition === "case_bound_restrictions_applied"
-      ? {
-          disposition: resolutionResult.resolution.disposition,
-          referenceCaseArtifactJson: caseArtifactJson,
-          analystNoteJson,
-          overlay: resolutionResult.resolution.restrictionOverlay,
-        }
-      : {
-          disposition: resolutionResult.resolution.disposition,
-          referenceCaseArtifactJson: caseArtifactJson,
-          analystNoteJson,
-        };
-    const validation = validatePublicReportCompositionInput(compositionInput, reviewAssertion);
-    if (!validation.valid || validation.review.authority !== "unverified_assertion"
-      || validation.review.assertedDisposition !== resolutionResult.resolution.disposition
-      || validation.restrictionCount !== resolutionResult.resolution.restrictions.length) fail("composition_validation_failed");
-
-    const context = makeContext(report, metrics, claims, resolutionResult.resolution);
+    const context = makeContext(snapshot.report, snapshot.metrics, snapshot.claims, snapshot.resolution);
     const handle = Object.freeze(Object.create(null)) as SolanaValidatedPublicReportContextHandle;
     contextByHandle.set(handle as object, context);
     return { valid: true, context: handle };

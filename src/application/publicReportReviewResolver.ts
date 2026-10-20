@@ -14,6 +14,11 @@ import {
   type PublicReportReviewResolutionResult,
   type PublicReportReviewRegistryRestriction,
 } from "../types/publicReportReviewRegistry";
+import type { SolanaClaimPermissionEvidence } from "../types/solanaClaimPermission";
+import type { SolanaQualificationMetricEvidence } from "../types/solanaQualificationMetricEvidence";
+import type { SolanaReferenceCaseV1 } from "../types/solanaReferenceCase";
+import type { SolanaTokenEvidenceReport } from "../types/solanaTokenEvidenceReport";
+import type { PublicReportValidationResult } from "../types/publicReportComposition";
 
 const MAX_JSON_BYTES = 20 * 1024 * 1024;
 const HASH = /^[0-9a-f]{64}$/;
@@ -43,6 +48,49 @@ const MESSAGES: Record<PublicReportReviewResolutionErrorCode, string> = {
 
 class ResolutionFailure extends Error {
   constructor(readonly code: PublicReportReviewResolutionErrorCode) { super(code); }
+}
+
+type SuccessfulResolution = Extract<PublicReportReviewResolutionResult, { valid: true }>;
+type SuccessfulValidation = Extract<PublicReportValidationResult, { valid: true }>;
+
+/** Internal request-scoped data. Never attach this raw snapshot to or serialize it with the result. */
+export interface InternalValidatedPublicReportSnapshot {
+  readonly registrySchemaVersion: typeof PUBLIC_REPORT_REVIEW_REGISTRY_SCHEMA_VERSION;
+  readonly registryRecord: PublicReportReviewRegistryRecordV1;
+  readonly caseArtifactBytesSha256: string;
+  readonly analystNoteBytesSha256: string;
+  readonly analystNoteIdentity: {
+    readonly caseId: string;
+    readonly caseHash: string;
+    readonly reviewerPseudonym: string;
+    readonly reviewedAt: string;
+  };
+  readonly referenceCase: SolanaReferenceCaseV1;
+  readonly report: SolanaTokenEvidenceReport;
+  readonly metrics: SolanaQualificationMetricEvidence;
+  readonly claims: SolanaClaimPermissionEvidence;
+  readonly validation: SuccessfulValidation;
+  readonly resolution: SuccessfulResolution["resolution"];
+}
+
+const validatedSnapshotByResult = new WeakMap<object, InternalValidatedPublicReportSnapshot>();
+
+function deepFreeze<T>(value: T, seen = new Set<object>()): T {
+  if (typeof value !== "object" || value === null || seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && "value" in descriptor) deepFreeze(descriptor.value, seen);
+  }
+  return Object.freeze(value);
+}
+
+/** Internal service accessor; fabricated or copied resolver results have no associated snapshot. */
+export function readInternalValidatedPublicReportSnapshot(
+  result: unknown,
+): InternalValidatedPublicReportSnapshot | null {
+  if (typeof result !== "object" || result === null) return null;
+  return validatedSnapshotByResult.get(result) ?? null;
 }
 
 function fail(code: PublicReportReviewResolutionErrorCode): never { throw new ResolutionFailure(code); }
@@ -230,9 +278,9 @@ export function createApplicationControlledPublicReportReviewResolver(
         fail("review_metadata_invalid");
       }
 
-      return {
+      const resolutionResult: SuccessfulResolution = Object.freeze({
         valid: true,
-        resolution: {
+        resolution: deepFreeze({
           recordId: record.recordId,
           recordVersion: record.recordVersion,
           caseId: record.caseId,
@@ -245,9 +293,32 @@ export function createApplicationControlledPublicReportReviewResolver(
           reviewedAt: record.reviewedAt,
           restrictions: record.restrictions,
           restrictionOverlay: overlay,
-          authority: "application_configuration_source_unverified",
-        },
-      };
+          authority: "application_configuration_source_unverified" as const,
+        }),
+      });
+      // The source evidence graph is freshly parsed and privately owned by this resolver call;
+      // freeze its snapshot bindings and the derived payloads without another full traversal of
+      // potentially large holder evidence. The service only exposes frozen metric/claim payloads.
+      const snapshot = Object.freeze({
+        registrySchemaVersion: PUBLIC_REPORT_REVIEW_REGISTRY_SCHEMA_VERSION,
+        registryRecord: record,
+        caseArtifactBytesSha256: createHash("sha256").update(input.caseArtifactJson, "utf8").digest("hex"),
+        analystNoteBytesSha256: noteSha256,
+        analystNoteIdentity: Object.freeze({
+          caseId: note.caseId as string,
+          caseHash: note.caseHash as string,
+          reviewerPseudonym: record.reviewerPseudonym,
+          reviewedAt: record.reviewedAt,
+        }),
+        referenceCase,
+        report: referenceCase.evidenceReport,
+        metrics: deepFreeze(metrics),
+        claims: deepFreeze(claims),
+        validation,
+        resolution: resolutionResult.resolution,
+      });
+      validatedSnapshotByResult.set(resolutionResult, snapshot);
+      return resolutionResult;
     } catch (error: unknown) {
       const code = error instanceof ResolutionFailure ? error.code : "malformed_registry";
       return failure(code);
