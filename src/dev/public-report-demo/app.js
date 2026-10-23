@@ -5,7 +5,7 @@
   const addressInput = document.getElementById("asset-address");
   const addressStatus = document.getElementById("address-status");
   const loadButton = document.getElementById("load-demo");
-  const submitButton = form.querySelector("button[type='submit']");
+  const submitButton = form?.querySelector("button[type='submit']");
   const reportStatus = document.getElementById("report-status");
   const reportRoot = document.getElementById("report-root");
   const demoBanner = document.getElementById("demo-banner");
@@ -309,7 +309,7 @@
       : "This is test data, not a real token analysis.";
   }
 
-  form.addEventListener("submit", async (event) => {
+  form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (requestActive) return;
     const submitted = addressInput.value.trim();
@@ -355,7 +355,9 @@
       const response = await fetch("/public-report.json", { headers: { Accept: "application/json" }, cache: "no-store" });
       if (!response.ok) throw new Error("local_sample_unavailable");
       renderReport(await response.json(), "synthetic");
-      addressStatus.textContent = "The report shown is the fixed synthetic example. It does not describe an address entered above.";
+      addressStatus.textContent = form
+        ? "The report shown is the fixed synthetic example. It does not describe an address entered above."
+        : "The report shown is the fixed synthetic example, not a real token analysis.";
     } catch {
       reportRoot.replaceChildren();
       reportStatus.textContent = "The local synthetic demonstration could not be loaded.";

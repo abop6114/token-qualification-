@@ -133,6 +133,24 @@ function descendants(element) {
   return [element, ...(element.children || []).flatMap(descendants)];
 }
 
+test("UAT browser renders synthetic data without a live form or submission", async () => {
+  const ids = ["address-status", "load-demo", "report-status", "report-root", "demo-banner"];
+  const elements = new Map(ids.map(id => [id, mockNode(id)]));
+  const report = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
+  report.token.name = "<img src=x onerror=alert(1)>";
+  let requests = 0;
+  const context = vm.createContext({ document: { getElementById: id => elements.get(id) ?? null, createElement: mockNode },
+    fetch: async url => { assert.equal(url, "/public-report.json"); requests++; return { ok: true, json: async () => report }; } });
+  vm.runInContext(fs.readFileSync(path.join(DEMO_ROOT, "app.js"), "utf8"), context);
+  await elements.get("load-demo").listeners.click();
+  assert.equal(requests, 1);
+  assert.match(elements.get("address-status").textContent, /not a real token analysis/);
+  assert.match(descendantText(elements.get("demo-banner")), /Synthetic demonstration/);
+  assert.match(descendantText(elements.get("report-root")), /<img src=x onerror=alert\(1\)>/);
+  assert.equal(descendants(elements.get("report-root")).some(node => node.tagName === "img"), false);
+  assert.match(descendantText(elements.get("report-root")), /This does not mean activity was zero/);
+});
+
 test("browser sends a live address to the local route and keeps the synthetic mode separately labeled", async () => {
   const report = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
   report.token.name = "Synthetic Test Token";

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Token Anatomy — Synthetic UAT</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Token Anatomy home"><span class="brand-mark" aria-hidden="true">TA</span><span>Token Anatomy</span></a>
+      <span class="prototype-tag">Private UAT · Synthetic data</span>
+    </header>
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">Evidence, explained</p>
+        <h1 id="page-title">Explore the evidence report</h1>
+        <p class="intro-copy">Review the report presentation using fixed synthetic data. No real token analysis is performed.</p>
+      </section>
+      <section class="lookup panel" aria-labelledby="lookup-title">
+        <h2 id="lookup-title">Synthetic demonstration</h2>
+        <button id="load-demo" class="button button-primary" type="button">Load synthetic demonstration</button>
+        <p id="address-status" class="status-message" role="status" aria-live="polite"></p>
+      </section>
+      <div id="demo-banner" class="demo-banner" hidden><strong>Synthetic demonstration</strong><span>This is test data, not a real token analysis.</span></div>
+      <div id="report-status" role="status" aria-live="polite"></div>
+      <div id="report-root"></div>
+    </main>
+    <footer><p>Evidence summary only. This prototype does not provide a token qualification verdict or investment recommendation.</p></footer>
+  </body>
+</html>

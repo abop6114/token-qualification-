@@ -1,5 +1,50 @@
 # Token Qualification Engine
 
+## Protected synthetic UAT (deployment requires separate authorization)
+
+The standalone `src/uat/publicReportUatServer.ts` entry point serves only the UAT
+page, shared renderer/CSS, and unchanged synthetic public-report fixture. It does
+not import analysis, provider, or database code. There is no live submission API.
+The existing loopback demo and analysis CLI remain separate.
+
+Proposed Render configuration: one Node Web Service, repository root directory,
+`npm ci --include=dev && npm run build`, then
+`node dist/uat/publicReportUatServer.js`. Pin `NODE_VERSION=24.22.1` and use
+`NODE_ENV=production`. Render supplies `PORT`; the server validates it and binds
+to `0.0.0.0`. Assets are loaded before listening. Use default TCP health checks;
+there is no unauthenticated HTTP health endpoint. Keep the source asset directory
+in the deployment because TypeScript does not copy these assets to `dist`.
+
+The owner must separately provision `TA_UAT_USERNAME` (1–64 ASCII letters,
+digits, dots, underscores or hyphens) and `TA_UAT_PASSWORD` (32–128 printable
+non-space ASCII characters, randomly generated) as Render secrets. Missing or
+invalid credentials prevent startup. Never place secrets in source, browser
+bundles, URLs, or logs. HTTP Basic authentication requires HTTPS for hosted use;
+Render terminates TLS. The same authentication protects the direct Render origin
+and any future custom domain. No provider keys, database URLs, `.env` loading,
+Supabase credentials, accounts, or persistence are needed.
+
+All assets and route responses require authentication. After ten failures in a
+60-second window, the single instance rejects all requests until that window
+ends. This bounded global throttle deliberately ignores forwarded IP headers;
+an attacker can temporarily deny tester access. This small-group UAT mechanism
+is not a production account system. Shared credentials lack individual revocation
+and browsers may retain Basic credentials. Rotate them through a separately
+authorized configuration change when access must be revoked.
+
+Disable auto-deploy and preview deployments. Deploy only an approved commit after
+independent review and explicit deployment authorization. Start on Free compute
+if cold starts are acceptable; consider the smallest paid instance for continuous
+testing. Monitor bandwidth/build usage and set a build spending limit. Make no
+DNS changes for initial UAT. Roll back only to a reviewed protected UAT deployment,
+rechecking restored configuration and secrets; otherwise suspend the service.
+
+Validate locally with `npm run build`,
+`node --test tests/publicReportUatServer.test.cjs`,
+`node --test tests/solanaPublicReportDemo.test.cjs`, and `npm test`.
+Tests use synthetic credentials and local loopback HTTP only. Do not use the
+application CLI or live capture commands for hosting validation.
+
 The Token Qualification Engine is a public resource for early token and meme-coin screening. A user enters an exact contract or mint address and receives an evidence-based analysis of whether the token appears to have economically meaningful participation, credible structure, and usable liquidity, along with the risks and uncertainties that remain.
 
 The project grew from manual token analyses that raised a central question: does apparent holder growth reflect independent participation, or activity such as dusting, rewards, transient wallets, bots, or coordinated distribution? The engine is intended to qualify participation and structure, rather than merely repeat headline market statistics.
