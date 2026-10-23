@@ -94,6 +94,7 @@
 
   function formatValue(field, value = valueOf(field)) {
     if (value === null || value === undefined) return stateCopy(field?.evidenceState);
+    if (field.id === "holders.observed_balance_distribution" && value === "A distribution summary is available for the retrieved records.") return "This older report does not include a numeric balance-distribution breakdown.";
     if (field.unit === "USD") {
       const numeric = Number(value);
       return Number.isFinite(numeric) ? new Intl.NumberFormat(undefined, {
@@ -210,11 +211,12 @@
   }
 
   function appendLimitations(parent, report) {
-    const sectionCodes = report.sections.flatMap((section) => section.limitationCodes || []);
-    const fieldCodes = report.sections.flatMap((section) => section.fields.flatMap((field) => field.limitationCodes || []));
+    const relevantSections = report.sections.filter((section) => section.evidenceState !== "not_requested");
+    const sectionCodes = relevantSections.flatMap((section) => section.limitationCodes || []);
+    const fieldCodes = relevantSections.flatMap((section) => section.fields.flatMap((field) => field.limitationCodes || []));
     const gapCodes = (report.evidenceGaps || []).map((gap) => gap.code);
     const messages = [...new Set([...sectionCodes, ...fieldCodes])].map((code) => limitationCopy[code]).filter(Boolean);
-    for (const code of gapCodes) if (gapCopy[code]) messages.push(gapCopy[code]);
+    for (const code of gapCodes) if (gapCopy[code] && !["partial_coverage", "claim_withheld", "source_not_requested"].includes(code)) messages.push(gapCopy[code]);
     const section = appendSection(parent, "What this report cannot establish", "These limits describe the evidence; they are not a token safety verdict.");
     if (messages.length === 0) {
       section.append(node("p", "section-intro", "No additional limitations were recorded in this report."));
@@ -229,16 +231,18 @@
     const details = node("details", "details-panel");
     details.append(node("summary", "", "Technical details, including provider-reported valuation figures"));
     const body = node("div", "details-body");
-    for (const field of report.technicalDetails.filter((item) => item.visibility === "technical_details")) {
+    const shownIds = new Set(report.sections.filter(section => section.id !== "identity").flatMap(section => section.fields)
+      .filter(field => field.visibility === "summary").map(field => field.id));
+    for (const field of report.technicalDetails.filter((item) => item.visibility === "technical_details" && !shownIds.has(item.id))) {
       const row = node("div", "details-row");
       const label = node("div", "data-item-label", field.label || "Technical detail");
       if (field.id === "market.market_cap" || field.id === "market.fdv") label.append(node("span", "technical-badge", "Provider reported"));
       row.append(label);
       const valueColumn = node("div");
-      valueColumn.append(node("div", "data-item-value", formatValue(field)));
-      if (field.explanation) valueColumn.append(node("p", "data-item-note", field.explanation));
+      valueColumn.append(node("div", "data-item-value", field.id.startsWith("token_controls.") ? valueCopy(field) : formatValue(field)));
+      if (field.explanation && !["market.market_cap", "market.fdv"].includes(field.id)) valueColumn.append(node("p", "data-item-note", field.explanation));
       if (field.id === "market.market_cap" || field.id === "market.fdv") {
-        valueColumn.append(node("p", "data-item-note", "This figure is not reconciled valuation ground truth; its denominator and scope are not established."));
+        valueColumn.append(node("p", "data-item-note", "This is a provider-reported current valuation, not a forecast. Its denominator and scope are not established; it cannot establish future market cap or upside."));
       }
       addObservation(valueColumn, field);
       row.append(valueColumn);
@@ -287,6 +291,8 @@
       if (field) grid.append(renderMetric(field, { card: true }));
     }
     overview.append(grid);
+    if (holders) overview.append(node("p", "coverage-note", holderCompleteness(holders)));
+    overview.append(node("p", "data-item-note", "Decision context: liquidity describes the selected pool, volume describes reported activity, and holder concentration is shown only when supported. This snapshot does not establish token quality, growth, market share or future valuation."));
 
     const marketBlock = appendSection(reportRoot, "Market information", "Reported figures describe the selected pool and observation, not the token’s entire market.");
     const marketGrid = node("div", "data-list");
@@ -312,9 +318,18 @@
     const holderGrid = node("div", "data-list");
     for (const id of ["holders.observed_address_count", "holders.concentration_top1", "holders.concentration_top5", "holders.concentration_top10", "holders.concentration_top20"]) {
       const field = allFields.get(id);
-      if (field) holderGrid.append(renderMetric(field));
+      if (field && (id === "holders.observed_address_count" || valueOf(field) !== null)) holderGrid.append(renderMetric(field));
     }
     holderBlock.append(holderGrid);
+    const distribution = allFields.get("holders.observed_balance_distribution");
+    if (distribution && valueOf(distribution) !== null) holderBlock.append(renderMetric(distribution));
+    const missingShares = ["holders.concentration_top1", "holders.concentration_top5", "holders.concentration_top10", "holders.concentration_top20"]
+      .filter((id) => !allFields.has(id) || valueOf(allFields.get(id)) === null);
+    if (missingShares.length) holderBlock.append(node("p", "coverage-note", `Concentration not established for: ${missingShares.map((id) => id.split("_").pop().replace("top", "top ")).join(", ")}. Missing values are not zero and do not establish dispersed ownership.`));
+    const coverage = holders?.holderCoverage;
+    const reasons = { provider_terminated: "The provider returned its final page.", page_cap: "Collection stopped at the configured page limit.", request_timeout: "Collection stopped after a provider request timed out.", provider_error: "Collection stopped after a provider failure.", http_error: "Collection stopped after an unsuccessful provider response.", malformed_response: "Collection stopped because a provider response could not be validated.", configuration_error: "Collection could not continue because provider configuration was unavailable." };
+    holderBlock.append(node("p", "data-item-note", coverage && Object.hasOwn(reasons, coverage.stopReason) ? reasons[coverage.stopReason] : "The collection stop reason is not available in this report."));
+    if (Number.isSafeInteger(coverage?.pagesRetrieved) && coverage.pagesRetrieved >= 0) holderBlock.append(node("p", "data-item-note", `Pages retrieved: ${coverage.pagesRetrieved}. Page count is not a percentage of total holders.`));
 
     const controlBlock = appendSection(reportRoot, "Token settings", "These observed settings describe administrative controls, not whether anyone has used them or whether a token is safe.");
     const controlGrid = node("div", "data-list");
@@ -323,6 +338,7 @@
       if (field) controlGrid.append(renderControl(field));
     }
     controlBlock.append(controlGrid);
+    controlBlock.append(node("p", "data-item-note", "Why these controls matter: mint authority governs additional issuance through the base token program; freeze authority governs freezing token accounts. Their absence does not establish liquidity safety, fair ownership, demand or future price."));
 
     const historyBlock = appendSection(reportRoot, "Historical activity", "A missing historical sample is not evidence of zero activity.");
     const historyFields = history ? history.fields : [];

@@ -160,6 +160,7 @@ test("partial holder enumeration remains explicit and does not expose concentrat
   assert.equal(result.valid, true);
   const holders = result.report.sections.find((item) => item.id === "holders");
   assert.equal(holders.completeness, "partial");
+  assert.deepEqual(holders.holderCoverage, { pagesRetrieved: 1, stopReason: "request_timeout" });
   assert.ok(holders.limitationCodes.includes("partial_enumeration"));
   for (const id of ["holders.concentration_top1", "holders.concentration_top5", "holders.concentration_top10", "holders.concentration_top20"]) {
     const item = field(result.report, id, "holders");
@@ -333,4 +334,16 @@ test("composition benchmark reports median and p95 independently of validation",
   const bytes = Buffer.byteLength(JSON.stringify(report.report), "utf8");
   const contextBytes = Buffer.byteLength(JSON.stringify(service.readValidatedSolanaPublicReportContext(handle)), "utf8");
   console.log(`COMPOSER_BENCHMARK iterations=${durations.length} contextBytes=${contextBytes} outputBytes=${bytes} medianMs=${median.toFixed(4)} p95Ms=${p95.toFixed(4)}`);
+});
+
+test("complete holder coverage and aggregate distribution stay descriptive and redacted", async () => {
+  const { handle } = await resolvedContext(MINT, { holderRows: 2 });
+  const result = composeSolanaPublicReport(handle);
+  assert.equal(result.valid, true);
+  const holders = result.report.sections.find(s => s.id === "holders");
+  assert.deepEqual(holders.holderCoverage, { pagesRetrieved: 1, stopReason: "provider_terminated" });
+  const distribution = holders.fields.find(f => f.id === "holders.observed_balance_distribution");
+  assert.match(distribution.value, /2 distinct positive balance amounts/);
+  assert.match(distribution.value, /do not establish common ownership or coordination/);
+  assert.doesNotMatch(JSON.stringify(result.report), /numeratorRaw|denominatorRaw|rawOwnerAuthorities|paginationKey/);
 });

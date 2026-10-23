@@ -86,3 +86,18 @@ footer p { margin: 0; }
   .details-row { grid-template-columns: 1fr; gap: .15rem; }
   .intro { padding-top: 2.2rem; }
 }
+
+.coverage-note { border-left: 3px solid var(--amber-ink); padding: .5rem .8rem; background: var(--amber-pale); margin-top: 1rem; }
+@media print {
+  body { min-width: 0; font-size: 10pt; background: white; }
+  main { width: 100%; }
+  .intro, .lookup, #report-status, #address-status, .prototype-tag { display: none !important; }
+  .site-header { padding: .4rem 0; }
+  .report-section { border: 0; padding: .5rem 0; margin: .5rem 0; }
+  .summary-grid, .data-list { display: block; }
+  .summary-card, .data-item, .details-row, .coverage-note { break-inside: avoid; }
+  h2, h3, .section-kicker, .data-item-label { break-after: avoid; }
+  .details-row { display: block; }
+  .token-address code { display: block; }
+  footer { margin-top: 1rem; padding: .5rem; }
+}

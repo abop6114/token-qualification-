@@ -58,6 +58,8 @@ export interface PublicReportSection {
   id: PublicReportSectionId;
   evidenceState: PublicEvidenceState;
   completeness: "complete" | "partial" | "not_established" | null;
+  /** Safe acquisition facts, never raw provider text or account data. */
+  holderCoverage?: { pagesRetrieved: number | null; stopReason: "provider_terminated" | "page_cap" | "request_timeout" | "provider_error" | "http_error" | "malformed_response" | "configuration_error" | "not_established" };
   fields: readonly PublicReportField[];
   limitationCodes: readonly PublicLimitationCode[];
 }

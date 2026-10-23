@@ -182,7 +182,13 @@ function allowedValue(definition: FieldDefinition, metric: SolanaQualificationMe
     return null;
   }
   if (!claim || claim.outcome !== "permitted") return null;
-  if (definition.display === "distribution") return "A distribution summary is available for the retrieved records.";
+  if (definition.display === "distribution") {
+    if (!isRecord(claim.value)) return null;
+    const distinct = claim.value["holders.distribution.distinct_balance_count"];
+    const repeated = claim.value["holders.distribution.authorities_in_repeated_balance_groups"];
+    if (!Number.isSafeInteger(distinct) || (distinct as number) < 0 || !Number.isSafeInteger(repeated) || (repeated as number) < 0) return null;
+    return `Retrieved records contain ${distinct} distinct positive balance amounts; ${repeated} owner-authority addresses share a balance amount with another observed address. Equal balances alone do not establish common ownership or coordination.`;
+  }
   if (definition.display === "history") return definition.id === "historical.integration_coverage"
     ? "Transaction integration evidence applies only to the supplied candidate set."
     : "Bounded historical evidence is available for the selected sample.";
@@ -193,7 +199,6 @@ function allowedValue(definition: FieldDefinition, metric: SolanaQualificationMe
       && Number.isSafeInteger(row.extensionTypeId) && typeof row.extensionName === "string" && Number.isSafeInteger(row.payloadLength))) return null;
     return metric.value.length === 0 ? "No recognized mint extensions were recorded." : `${metric.value.length} recognized mint extension${metric.value.length === 1 ? "" : "s"} recorded; presence only.`;
   }
-  if (definition.id === "holders.observed_balance_distribution") return "A distribution summary is available for the retrieved records.";
   let value: unknown = claim.value;
   if (definition.id.startsWith("holders.concentration_") && isRecord(claim.value)
     && claim.value.percentage === metric.value) value = claim.value.percentage;
@@ -325,6 +330,14 @@ function latestObservation(metrics: readonly SolanaQualificationMetricEvidenceEn
   return dates[0] ?? null;
 }
 
+function safeHolderStopReason(value: string | null): NonNullable<PublicReportSection["holderCoverage"]>["stopReason"] {
+  switch (value) {
+    case "provider_terminated": case "page_cap": case "request_timeout": case "provider_error":
+    case "http_error": case "malformed_response": case "configuration_error": return value;
+    default: return "not_established";
+  }
+}
+
 /** Pure deterministic projection. Only a process-local validated context handle is accepted. */
 export function composeSolanaPublicReport(handle: unknown): SolanaPublicReportComposerResult {
   const rawContext = readValidatedSolanaPublicReportContext(handle);
@@ -344,7 +357,13 @@ export function composeSolanaPublicReport(handle: unknown): SolanaPublicReportCo
           : id === "historical" ? context.provenance.sections.historicalTransactions
             : context.provenance.sections[id];
       return { id, evidenceState: sectionState(sourceStatus), completeness: sectionCompleteness(id, context, fields), fields,
-        limitationCodes: sectionLimitations(id, context, fields) };
+        limitationCodes: sectionLimitations(id, context, fields),
+        ...(id === "holders" ? { holderCoverage: {
+          pagesRetrieved: Number.isSafeInteger(context.provenance.holderCoverage.pageCount) && context.provenance.holderCoverage.pageCount! >= 0
+            ? context.provenance.holderCoverage.pageCount : null,
+          stopReason: safeHolderStopReason(context.provenance.holderCoverage.enumerationStopReason),
+        } } : {}),
+      };
     });
     const summary = all.filter((field) => field.visibility === "summary");
     const technicalDetails = all.map((field) => field.visibility === "summary"

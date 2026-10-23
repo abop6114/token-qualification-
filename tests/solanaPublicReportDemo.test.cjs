@@ -368,3 +368,27 @@ test("browser sends a live address to the local route and keeps the synthetic mo
   assert.ok(details, "technical data is placed in a native expandable details element");
   assert.doesNotMatch(JSON.stringify(elements.get("report-root")), /numeratorRaw|denominatorRaw|ownerAddress|requestObservations|Bearer /);
 });
+
+test("partial holder report explains coverage without invented concentration or raw reason text", async () => {
+  const report = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
+  const holders = report.sections.find(s => s.id === "holders");
+  holders.completeness = "partial";
+  holders.holderCoverage = { pagesRetrieved: 20, stopReason: "page_cap" };
+  for (const f of holders.fields.filter(f => f.id.startsWith("holders.concentration_"))) { f.visibility = "withheld"; delete f.value; }
+  const ids = ["address-status", "load-demo", "report-status", "report-root", "demo-banner"];
+  const elements = new Map(ids.map(id => [id, mockNode(id)]));
+  const context = vm.createContext({ document: { getElementById: id => elements.get(id), createElement: mockNode }, Intl, Date, Number, Map, Set, Object,
+    fetch: async url => { assert.equal(url, "/public-report.json"); return { ok: true, json: async () => report }; } });
+  vm.runInContext(fs.readFileSync(path.join(DEMO_ROOT, "app.js"), "utf8"), context);
+  await elements.get("load-demo").listeners.click();
+  const text = descendantText(elements.get("report-root"));
+  assert.match(text, /configured page limit/);
+  assert.match(text, /Pages retrieved: 20/);
+  assert.match(text, /Missing values are not zero/);
+  assert.match(text, /does not establish token quality, growth, market share or future valuation/);
+  assert.doesNotMatch(text, /Historical evidence covers only the requested sample/);
+  holders.holderCoverage.stopReason = "private-provider-error-sentinel";
+  await elements.get("load-demo").listeners.click();
+  assert.doesNotMatch(descendantText(elements.get("report-root")), /private-provider-error-sentinel/);
+  assert.match(descendantText(elements.get("report-root")), /stop reason is not available/);
+});
