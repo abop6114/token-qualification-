@@ -91,6 +91,96 @@ function marketPoolWithDexId(dexId) {
 const key = (byte) => encodeSolanaPublicKey(Buffer.alloc(32, byte));
 const MINT = key(90);
 
+const { replaySolanaHolderAssessment } = require("../dist/application/solanaHolderAssessmentReplay.js");
+const { deriveSolanaHolderAssessmentFromReport } = require("../dist/application/solanaHolderAssessmentFromReport.js");
+
+// In-memory test artifact only. Its capture-origin claim is deliberately not
+// authenticated by the hash; no capture operation or file persistence is used.
+async function replayFixture({ partial = false, missingHolders = false, marketUnavailable = false } = {}) {
+  const request = { chain: "solana", assetAddress: MINT, historicalTransactions: { status: "not_requested" } };
+  const time = "2026-10-15T12:00:00.000Z";
+  const account = Buffer.alloc(165);
+  account.set(Buffer.alloc(32, 90), 0); account.set(Buffer.alloc(32, 4), 32);
+  account.writeBigUInt64LE(80n, 64); account[108] = 1;
+  const generated = await originalGenerateWithTelemetry(request, {
+    getAccount: async () => mintAccount(MINT),
+    getMarkets: async () => { if (marketUnavailable) throw new DexScreenerProviderError("http_error", 503); return []; },
+    getTokenAccountPages: async () => missingHolders
+      ? { status: "unavailable", reason: "request_timeout" }
+      : { status: "available", completeness: partial ? "partial" : "complete",
+          stopReason: partial ? "request_timeout" : "provider_terminated", configuredMaxPages: 20, requestedPageSize: 5000,
+          pages: [{ accounts: [{ address: key(5), programOwner: SOLANA_TOKEN_PROGRAM_IDS["spl-token"], dataBase64: account.toString("base64"), reportedSpace: 165 }], paginationKey: partial ? "next" : null, contextSlot: 321 }] },
+    now: () => new Date(time),
+  });
+  return resignCase({
+    schemaVersion: "solana-reference-case-v1", caseId: "00000000-0000-4000-8000-000000000001",
+    identity: { chain: "solana", mintAddress: MINT },
+    capture: { startedAt: time, completedAt: time, request, executionBoundary: "protected_public_execution",
+      captureOrigin: "protected_application_composition", requestBudgetEnvelope: 22, operationalTelemetry: generated.operationalTelemetry },
+    evidenceReport: generated.report, limitations: ["history_not_requested", "report_not_atomic"],
+  });
+}
+
+test("holder replay binds independently derived assessment to verified case bytes", async () => {
+  const artifact = await replayFixture();
+  const bytes = canonicalizeSolanaReferenceCaseValue(artifact);
+  const replay = replaySolanaHolderAssessment(bytes);
+  assert.deepEqual(replay.source, { caseId: artifact.caseId, contentHash: artifact.contentHash, integrity: "valid", provenance: "capture_path_claim_unverified" });
+  assert.deepEqual(replay.result, deriveSolanaHolderAssessmentFromReport(artifact.evidenceReport));
+  assert.deepEqual(replaySolanaHolderAssessment(bytes), replay);
+  assert.equal(replay.result.assessment.population.notExcluded.observedBalanceRaw, "80");
+  replay.source.contentHash.digestHex = "changed";
+  replay.result.assessment.population.subjects[0].balanceRaw = "changed";
+  assert.equal(canonicalizeSolanaReferenceCaseValue(artifact), bytes);
+  assert.equal(replaySolanaHolderAssessment(bytes).result.assessment.population.notExcluded.observedBalanceRaw, "80");
+  assert.equal(Object.hasOwn(artifact, "assessment"), false);
+});
+
+test("holder replay preserves partial, missing-holder, and unavailable-market semantics", async () => {
+  for (const options of [{ partial: true }, { missingHolders: true }, { marketUnavailable: true }]) {
+    const artifact = await replayFixture(options);
+    const replay = replaySolanaHolderAssessment(canonicalizeSolanaReferenceCaseValue(artifact));
+    assert.deepEqual(replay.result, deriveSolanaHolderAssessmentFromReport(artifact.evidenceReport));
+    if (options.missingHolders) assert.deepEqual(replay.result, { status: "not_attempted", reason: "holder_evidence_unavailable" });
+    if (options.partial) assert.equal(replay.result.assessment.concentration.notExcludedTopNCurrentMintSupplyShare.reason, "enumeration_incomplete");
+    if (options.marketUnavailable) assert.equal(replay.result.assessment.exclusionAssessment.summary.unresolvedCount, 1);
+  }
+});
+
+test("holder replay rejects malformed, tampered, noncanonical, and invalid case claims", async () => {
+  const artifact = await replayFixture();
+  const bytes = canonicalizeSolanaReferenceCaseValue(artifact);
+  const changed = structuredClone(artifact); changed.caseId = "00000000-0000-4000-8000-000000000002";
+  for (const invalid of ["{", bytes + "\n", canonicalizeSolanaReferenceCaseValue(changed)]) {
+    assert.throws(() => replaySolanaHolderAssessment(invalid), error => error instanceof SolanaReferenceCaseError);
+  }
+  for (const mutate of [
+    a => { a.identity.mintAddress = key(8); },
+    a => { a.capture.captureOrigin = "synthetic_test_fixture"; },
+    a => { a.evidenceReport.mint = { status: "unavailable", reason: "mint_provider_unavailable" }; },
+  ]) {
+    const invalid = structuredClone(artifact); mutate(invalid);
+    assert.throws(() => replaySolanaHolderAssessment(canonicalizeSolanaReferenceCaseValue(resignCase(invalid))), error => error instanceof SolanaReferenceCaseError);
+  }
+});
+
+test("holder replay runs without network, file persistence, or report generation", async () => {
+  const bytes = canonicalizeSolanaReferenceCaseValue(await replayFixture());
+  const script = `
+    global.fetch = () => { throw Error('network forbidden'); };
+    require('node:net').Socket.prototype.connect = () => { throw Error('network forbidden'); };
+    require('node:tls').connect = () => { throw Error('network forbidden'); };
+    const fs = require('node:fs/promises');
+    for (const name of ['readFile', 'writeFile', 'open', 'mkdir', 'link', 'unlink']) fs[name] = () => { throw Error('file access forbidden'); };
+    const service = require('./dist/application/solanaTokenEvidenceReport.js');
+    service.generateSolanaTokenEvidenceReport = service.generateSolanaTokenEvidenceReportWithTelemetry = () => { throw Error('acquisition forbidden'); };
+    const { replaySolanaHolderAssessment } = require('./dist/application/solanaHolderAssessmentReplay.js');
+    if (replaySolanaHolderAssessment(${JSON.stringify(bytes)}).result.status !== 'present') process.exit(1);
+  `;
+  const child = require('node:child_process').spawnSync(process.execPath, ['-e', script], { cwd: process.cwd(), encoding: 'utf8', timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, ''); assert.equal(child.stderr, '');
+});
+
 function mintAccount(address) {
   const data = Buffer.alloc(82);
   data.writeBigUInt64LE(100n, 36);
