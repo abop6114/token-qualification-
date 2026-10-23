@@ -32,9 +32,10 @@
         <form id="address-form" novalidate>
           <label for="asset-address">Token address</label>
           <div class="lookup-row">
-            <input id="asset-address" name="asset-address" autocomplete="off" spellcheck="false" placeholder="Paste a Solana token address" aria-describedby="address-help address-status">
+            <input id="asset-address" name="asset-address" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="44" placeholder="Paste a Solana token address" aria-describedby="address-help address-status">
             <button class="button button-secondary" type="submit">Generate evidence report</button>
           </div>
+          <button id="cancel-report" class="button button-secondary" type="button" hidden>Cancel request</button>
           <p id="address-help" class="muted">One analysis at a time. Historical transactions are not requested. Provider evidence may be partial or unavailable.</p>
           <p id="address-status" class="status-message" role="status" aria-live="polite"></p>
         </form>

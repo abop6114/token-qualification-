@@ -133,6 +133,55 @@ function descendants(element) {
   return [element, ...(element.children || []).flatMap(descendants)];
 }
 
+test("lookup cancellation, timeout, stale responses, and safe recovery", async () => {
+  const ids = ["address-form", "asset-address", "address-status", "load-demo", "cancel-report", "report-status", "report-root", "demo-banner"];
+  const elements = new Map(ids.map(id => [id, mockNode(id)]));
+  const pending = [], timers = new Map(); let timerId = 0;
+  const sample = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
+  const address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+  sample.token.assetId = address;
+  const context = vm.createContext({
+    document: { getElementById: id => elements.get(id), createElement: mockNode }, AbortController,
+    setTimeout: (fn, ms) => { assert.equal(ms, 65000); timers.set(++timerId, fn); return timerId; },
+    clearTimeout: id => timers.delete(id),
+    fetch: (url, options) => new Promise(resolve => pending.push({ url, options, resolve })),
+  });
+  vm.runInContext(fs.readFileSync(path.join(DEMO_ROOT, "app.js"), "utf8"), context);
+  const submit = () => elements.get("address-form").listeners.submit({ preventDefault() {} });
+  const cancel = () => elements.get("cancel-report").listeners.click();
+  elements.get("asset-address").value = "invalid input";
+  await submit(); assert.equal(pending.length, 0);
+  assert.match(elements.get("address-status").textContent, /32–44/);
+  elements.get("asset-address").value = address;
+  const old = submit(); cancel();
+  assert.equal(pending[0].options.signal.aborted, true);
+  assert.equal(elements.get("asset-address").disabled, false);
+  const newer = submit();
+  pending[0].resolve({ ok: true, json: async () => sample }); await old;
+  assert.equal(elements.get("asset-address").disabled, true);
+  assert.equal(elements.get("report-root").children.length, 0);
+  pending[1].resolve({ ok: true, json: async () => sample }); await newer;
+  assert.ok(elements.get("report-root").children.length > 0);
+  assert.equal(timers.size, 0);
+  const timed = submit(); [...timers.values()][0]();
+  assert.equal(pending[2].options.signal.aborted, true);
+  assert.match(elements.get("report-status").textContent, /timed out/);
+  pending[2].resolve({ ok: true, json: async () => sample }); await timed;
+  assert.equal(elements.get("report-root").children.length, 0);
+  for (const [code, pattern] of [["admission_rejected", /busy/], ["budget_exhausted", /allowance/], ["evidence_unavailable", /verified/], ["unknown", /could not be completed/]]) {
+    const run = submit(); pending.at(-1).resolve({ ok: false, json: async () => ({ error: { code, message: "SECRET_RAW_ERROR" } }) }); await run;
+    assert.match(elements.get("report-status").textContent, pattern);
+    assert.doesNotMatch(elements.get("report-status").textContent, /SECRET/);
+    assert.equal(elements.get("asset-address").disabled, false);
+  }
+  const mismatch = submit(); pending.at(-1).resolve({ ok: true, json: async () => ({ ...sample, token: { ...sample.token, assetId: "wrong" } }) }); await mismatch;
+  assert.match(elements.get("report-status").textContent, /did not match/);
+  assert.equal(elements.get("report-root").children.length, 0);
+  const recovery = submit(); pending.at(-1).resolve({ ok: true, json: async () => sample }); await recovery;
+  assert.ok(elements.get("report-root").children.length > 0);
+  assert.equal(timers.size, 0);
+});
+
 test("UAT browser renders synthetic data without a live form or submission", async () => {
   const ids = ["address-status", "load-demo", "report-status", "report-root", "demo-banner"];
   const elements = new Map(ids.map(id => [id, mockNode(id)]));
@@ -226,6 +275,7 @@ test("browser sends a live address to the local route and keeps the synthetic mo
   const liveResponse = new Promise((resolve) => { releaseLiveRequest = resolve; });
   const context = vm.createContext({
     document,
+    AbortController, setTimeout, clearTimeout,
     Intl,
     Date,
     Number,

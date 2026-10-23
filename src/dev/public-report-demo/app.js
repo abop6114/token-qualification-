@@ -10,6 +10,42 @@
   const reportRoot = document.getElementById("report-root");
   const demoBanner = document.getElementById("demo-banner");
   let requestActive = false;
+  const cancelButton = document.getElementById("cancel-report");
+  let activeLookup = null;
+  // Allow the service's existing 60-second deadline to return its safe error.
+  const LOOKUP_WAIT_MS = 65000;
+  const lookupErrors = {
+    invalid_request: "Enter a valid Solana token address, then submit again.",
+    admission_rejected: "Analysis is busy or temporarily unavailable. Try again later.",
+    budget_exhausted: "The analysis allowance is exhausted. Try again when service is available.",
+    deadline_exceeded: "The request timed out. No completed report was returned. You can try again.",
+    cancelled: "The request was cancelled. You can submit an address again.",
+    evidence_unavailable: "This address could not be verified as a Solana token mint. Check the address.",
+    report_unavailable: "A report could not be prepared from the available evidence. Try again later.",
+  };
+
+  function finishLookup(lookup) {
+    if (activeLookup !== lookup) return;
+    clearTimeout(lookup.timer);
+    activeLookup = null;
+    requestActive = false;
+    submitButton.disabled = false;
+    loadButton.disabled = false;
+    addressInput.disabled = false;
+    if (cancelButton) cancelButton.hidden = true;
+    form.setAttribute?.("aria-busy", "false");
+  }
+
+  function stopLookup(reason) {
+    const lookup = activeLookup;
+    if (!lookup) return;
+    finishLookup(lookup);
+    lookup.controller.abort();
+    addressStatus.textContent = reason === "cancelled" ? "Request cancelled." : "Request timed out.";
+    reportStatus.textContent = lookupErrors[reason];
+    addressInput.focus?.();
+  }
+  cancelButton?.addEventListener("click", () => stopLookup("cancelled"));
 
   const limitationCopy = {
     selected_pool_only: "These market figures describe one selected pool, not all markets for the token.",
@@ -316,36 +352,46 @@
     reportRoot.replaceChildren();
     demoBanner.hidden = true;
     reportStatus.textContent = "";
-    if (!submitted) {
-      addressStatus.textContent = "Enter a Solana token address, or load the synthetic demonstration below.";
+    addressInput.setAttribute?.("aria-invalid", "false");
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(submitted)) {
+      addressStatus.textContent = "Enter a Solana token address (32–44 base58 characters), or load the synthetic demonstration below. The server verifies the address.";
+      addressInput.setAttribute?.("aria-invalid", "true");
+      addressInput.focus?.();
       return;
     }
     submitButton.disabled = true;
     loadButton.disabled = true;
     addressInput.disabled = true;
     requestActive = true;
-    addressStatus.textContent = "Retrieving bounded evidence and preparing a report…";
+    const lookup = { controller: new AbortController(), timer: null };
+    activeLookup = lookup;
+    lookup.timer = setTimeout(() => { if (activeLookup === lookup) stopLookup("deadline_exceeded"); }, LOOKUP_WAIT_MS);
+    if (cancelButton) cancelButton.hidden = false;
+    form.setAttribute?.("aria-busy", "true");
+    addressStatus.textContent = `Preparing a report for ${submitted}. This can take up to about a minute. You can cancel this request.`;
     try {
       const response = await fetch("/api/report", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ chain: "solana", assetAddress: submitted }),
         cache: "no-store",
+        signal: lookup.controller.signal,
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload?.error?.message || "A report could not be prepared.");
+      if (activeLookup !== lookup) return;
+      if (!response.ok) throw new Error(Object.hasOwn(lookupErrors, payload?.error?.code) ? lookupErrors[payload.error.code] : "The request could not be completed. Try again later.");
+      if (payload?.token?.chain !== "solana" || payload.token.assetId !== submitted) throw new Error("The returned report did not match the submitted address. No report is shown.");
       renderReport(payload, "live");
       addressStatus.textContent = "Live evidence report prepared. Review the listed limits and evidence gaps.";
     } catch (error) {
+      if (activeLookup !== lookup) return;
       reportRoot.replaceChildren();
       demoBanner.hidden = true;
       addressStatus.textContent = "The live report could not be prepared.";
-      reportStatus.textContent = error instanceof Error && error.message ? error.message : "Try again later.";
+      const safeMessages = [...Object.values(lookupErrors), "The request could not be completed. Try again later.", "The returned report did not match the submitted address. No report is shown."];
+      reportStatus.textContent = error instanceof Error && safeMessages.includes(error.message) ? error.message : "The request could not be completed. Check your connection and try again.";
     } finally {
-      submitButton.disabled = false;
-      loadButton.disabled = false;
-      addressInput.disabled = false;
-      requestActive = false;
+      finishLookup(lookup);
     }
   });
 

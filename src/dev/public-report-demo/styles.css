@@ -45,6 +45,9 @@ input:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visibl
 .demo-choice span, .muted { color: var(--muted); }
 .muted { font-size: .85rem; margin: .45rem 0 0; }
 .status-message { min-height: 1.3em; margin: .4rem 0 0; font-weight: 600; color: var(--amber-ink) !important; }
+.status-message, #report-status { overflow-wrap: anywhere; }
+#cancel-report { margin-top: .65rem; }
+.button:disabled { opacity: .65; cursor: wait; }
 .demo-banner { display: flex; flex-wrap: wrap; gap: .4rem .8rem; margin: 1.5rem 0 0; padding: .85rem 1rem; color: var(--amber-ink); background: var(--amber-pale); border: 1px solid #eed9a6; border-radius: .75rem; }
 .token-heading { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 1rem; margin: 2rem 0 1rem; }
 .token-heading h2 { margin: 0; font-size: 1.35rem; }
