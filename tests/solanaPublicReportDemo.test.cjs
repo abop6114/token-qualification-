@@ -151,6 +151,48 @@ test("UAT browser renders synthetic data without a live form or submission", asy
   assert.match(descendantText(elements.get("report-root")), /This does not mean activity was zero/);
 });
 
+test("synthetic reloads serialize requests, clear stale success, and recover after failure", async () => {
+  const ids = ["address-status", "load-demo", "report-status", "report-root", "demo-banner"];
+  const elements = new Map(ids.map(id => [id, mockNode(id)]));
+  const report = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
+  let pending;
+  let requests = 0;
+  const context = vm.createContext({
+    document: { getElementById: id => elements.get(id) ?? null, createElement: mockNode },
+    fetch: url => {
+      assert.equal(url, "/public-report.json");
+      requests++;
+      return new Promise(resolve => { pending = resolve; });
+    },
+  });
+  vm.runInContext(fs.readFileSync(path.join(DEMO_ROOT, "app.js"), "utf8"), context);
+  const click = elements.get("load-demo").listeners.click;
+  const first = click();
+  assert.equal(elements.get("load-demo").disabled, true);
+  assert.match(elements.get("address-status").textContent, /Loading/);
+  await click();
+  assert.equal(requests, 1);
+  pending({ ok: true, json: async () => report });
+  await first;
+  assert.equal(elements.get("demo-banner").hidden, false);
+  const failedReload = click();
+  assert.equal(elements.get("demo-banner").hidden, true);
+  assert.equal(elements.get("report-root").children.length, 0);
+  pending({ ok: false });
+  await failedReload;
+  assert.equal(elements.get("address-status").textContent, "");
+  assert.match(elements.get("report-status").textContent, /could not be loaded/);
+  assert.equal(elements.get("load-demo").disabled, false);
+  const recovery = click();
+  pending({ ok: true, json: async () => report });
+  await recovery;
+  assert.equal(requests, 3);
+  assert.equal(elements.get("report-status").textContent, "");
+  assert.equal(elements.get("demo-banner").hidden, false);
+  assert.ok(elements.get("report-root").children.length > 0);
+  assert.equal(elements.get("load-demo").disabled, false);
+});
+
 test("browser sends a live address to the local route and keeps the synthetic mode separately labeled", async () => {
   const report = JSON.parse(fs.readFileSync(path.join(DEMO_ROOT, "public-report.json"), "utf8"));
   report.token.name = "Synthetic Test Token";

@@ -350,6 +350,14 @@
   });
 
   loadButton.addEventListener("click", async () => {
+    if (requestActive) return;
+    requestActive = true;
+    loadButton.disabled = true;
+    if (submitButton) submitButton.disabled = true;
+    if (addressInput) addressInput.disabled = true;
+    reportRoot.replaceChildren();
+    demoBanner.hidden = true;
+    addressStatus.textContent = "Loading the synthetic demonstration…";
     reportStatus.textContent = "";
     try {
       const response = await fetch("/public-report.json", { headers: { Accept: "application/json" }, cache: "no-store" });
@@ -360,7 +368,14 @@
         : "The report shown is the fixed synthetic example, not a real token analysis.";
     } catch {
       reportRoot.replaceChildren();
-      reportStatus.textContent = "The local synthetic demonstration could not be loaded.";
+      demoBanner.hidden = true;
+      addressStatus.textContent = "";
+      reportStatus.textContent = "The synthetic demonstration could not be loaded. Try again.";
+    } finally {
+      requestActive = false;
+      loadButton.disabled = false;
+      if (submitButton) submitButton.disabled = false;
+      if (addressInput) addressInput.disabled = false;
     }
   });
 })();
